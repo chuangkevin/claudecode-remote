@@ -14,13 +14,13 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 interface ManagedProcess {
   child: ChildProcess;
-  fullPrompt: string;         // full --append-system-prompt value (for change detection)
   status: "idle" | "running";
   idleTimer: ReturnType<typeof setTimeout> | null;
   buf: string;                // incomplete stdout line buffer
   stderrBuf: string;
   emittedLength: number;      // dedup partial chunks
   messageCount: number;       // 0 = freshly spawned, inject history on first msg
+  promptSent: boolean;        // true after system prompt has been injected once
   onChunk?: (text: string) => void;
   resolve?: () => void;
   reject?: (err: Error) => void;
@@ -85,21 +85,27 @@ const DEFAULT_SYSTEM_PROMPT = `你是 Kevin 的 AI 開發助手。
 - 發現問題就要修正，不要只回報不動手
 - 進度要主動回報`;
 
-function buildFullPrompt(userSystemPrompt?: string): string {
+function resolveSystemPrompt(userSystemPrompt?: string): string {
   return userSystemPrompt?.trim() ? userSystemPrompt.trim() : DEFAULT_SYSTEM_PROMPT;
 }
 
-/**
- * Embed prior conversation turns as a text prefix in the user message.
- * Used only when a process is freshly spawned and the session already has history
- * (e.g. after idle-timeout respawn or server restart).
- */
-function buildContextualMessage(userMessage: string, previousMessages: StoredMessage[]): string {
-  if (previousMessages.length === 0) return userMessage;
-  const history = previousMessages
-    .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
-    .join("\n\n");
-  return `[Prior conversation]\n${history}\n\n[Current message]\n${userMessage}`;
+function buildMessageText(
+  userMessage: string,
+  systemPrompt: string,
+  previousMessages: StoredMessage[],
+  includeSystemPrompt: boolean,
+  includeHistory: boolean,
+): string {
+  const parts: string[] = [];
+  if (includeSystemPrompt) parts.push(`[系統指令]\n${systemPrompt}`);
+  if (includeHistory && previousMessages.length > 0) {
+    const history = previousMessages
+      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+      .join("\n\n");
+    parts.push(`[Prior conversation]\n${history}`);
+  }
+  parts.push(includeSystemPrompt || includeHistory ? `[使用者訊息]\n${userMessage}` : userMessage);
+  return parts.join("\n\n");
 }
 
 function clearIdleTimer(proc: ManagedProcess): void {
@@ -160,7 +166,7 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
   // system/init and other events are ignored
 }
 
-function spawnProcess(sessionId: string, fullPrompt: string): ManagedProcess {
+function spawnProcess(sessionId: string): ManagedProcess {
   const env = { ...process.env };
   delete env.ANTHROPIC_API_KEY;
 
@@ -175,7 +181,6 @@ function spawnProcess(sessionId: string, fullPrompt: string): ManagedProcess {
     "--no-session-persistence",
     "--input-format", "stream-json",
     "--dangerously-skip-permissions",
-    "--append-system-prompt", fullPrompt,
   ];
 
   const child = spawn("claude", args, {
@@ -191,13 +196,13 @@ function spawnProcess(sessionId: string, fullPrompt: string): ManagedProcess {
 
   const proc: ManagedProcess = {
     child,
-    fullPrompt,
     status: "idle",
     idleTimer: null,
     buf: "",
     stderrBuf: "",
     emittedLength: 0,
     messageCount: 0,
+    promptSent: false,
   };
 
   pool.set(sessionId, proc);
@@ -276,18 +281,16 @@ export function runClaude(
   systemPrompt?: string,
   images?: ImageInput[],
 ): Promise<void> {
-  const fullPrompt = buildFullPrompt(systemPrompt);
-
   let proc = pool.get(sessionId);
 
-  // Respawn if: no process, process has exited, or system prompt changed
-  if (!proc || proc.child.exitCode !== null || proc.child.killed || proc.fullPrompt !== fullPrompt) {
+  // Respawn if: no process, or process has exited
+  if (!proc || proc.child.exitCode !== null || proc.child.killed) {
     if (proc) {
       clearIdleTimer(proc);
       try { proc.child.kill(); } catch { /* already dead */ }
       pool.delete(sessionId);
     }
-    proc = spawnProcess(sessionId, fullPrompt);
+    proc = spawnProcess(sessionId);
   }
 
   clearIdleTimer(proc);
@@ -300,13 +303,14 @@ export function runClaude(
     p.reject = reject;
     p.emittedLength = 0;
 
-    // First message to a freshly spawned process: inject history as context
     const isFirst = p.messageCount === 0;
     p.messageCount++;
 
-    const text = isFirst
-      ? buildContextualMessage(userMessage, previousMessages)
-      : userMessage;
+    const includeSystemPrompt = !p.promptSent;
+    if (includeSystemPrompt) p.promptSent = true;
+
+    const effectivePrompt = resolveSystemPrompt(systemPrompt);
+    const text = buildMessageText(userMessage, effectivePrompt, previousMessages, includeSystemPrompt, isFirst);
 
     const content = images && images.length > 0
       ? [
