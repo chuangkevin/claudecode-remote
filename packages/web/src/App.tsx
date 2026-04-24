@@ -259,6 +259,7 @@ export default function App() {
   const [sessions, setSessions] = useState<DiskSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [longWait, setLongWait] = useState(false)
 
   const currentResponseRef = useRef('')
   const sessionIdRef = useRef<string | null>(null)
@@ -266,9 +267,18 @@ export default function App() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const lastChunkAtRef = useRef<number>(0)
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
+
+  useEffect(() => {
+    if (!isProcessing) { setLongWait(false); return }
+    const t = setInterval(() => {
+      setLongWait(Date.now() - lastChunkAtRef.current > 30_000)
+    }, 2000)
+    return () => clearInterval(t)
+  }, [isProcessing])
 
   const fetchSessions = useCallback(async () => {
     try {
@@ -352,6 +362,8 @@ export default function App() {
           currentResponseRef.current += text
           setCurrentResponse(currentResponseRef.current)
           setIsProcessing(true)
+          lastChunkAtRef.current = Date.now()
+          setLongWait(false)
           break
         }
         case 'done': {
@@ -481,6 +493,8 @@ export default function App() {
     const imagePreviews = readyImages.map(p => p.thumbnail)
     setMessages(prev => [...prev, { role: 'user', content: input, timestamp: Date.now(), imagePreviews }])
     setIsProcessing(true)
+    setLongWait(false)
+    lastChunkAtRef.current = Date.now()
     currentResponseRef.current = ''
     setCurrentResponse('')
 
@@ -585,12 +599,22 @@ export default function App() {
             {isProcessing && !currentResponse && (
               <div className="flex justify-start">
                 <div className="rounded-xl px-4 py-3 bg-gray-800 border border-gray-700">
-                  <div className="flex items-center gap-1">
-                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" />
-                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.15s]" />
-                    <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.3s]" />
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" />
+                      <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.15s]" />
+                      <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.3s]" />
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {longWait ? '處理中，請稍候…' : '正在思考…'}
+                    </span>
                   </div>
                 </div>
+              </div>
+            )}
+            {isProcessing && currentResponse && longWait && (
+              <div className="flex justify-start">
+                <span className="text-xs text-yellow-600/80 px-1">⏳ 仍在處理中，請稍候…</span>
               </div>
             )}
             <div ref={messagesEndRef} />
