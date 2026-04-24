@@ -9,8 +9,13 @@ interface Message {
   imagePreviews?: string[]
 }
 
-interface ImageInput { base64: string; mediaType: string }
-interface PendingImage { preview: string; thumbnail: string; input: ImageInput }
+interface PendingImage {
+  localId: string    // client-side key for state updates
+  preview: string    // object URL for display while uploading
+  thumbnail: string  // small data URL shown after upload completes
+  id?: string        // server-assigned ID after upload
+  uploading: boolean
+}
 
 interface DiskSession {
   id: string
@@ -182,6 +187,9 @@ export default function App() {
     const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`)
     wsRef.current = ws
 
+    // Expose WS for E2E testing (force-close to simulate disconnect)
+    ;(window as unknown as Record<string, unknown>).__testWs = ws
+
     ws.onopen = () => {
       setIsConnected(true)
       void fetchSessions()
@@ -203,7 +211,15 @@ export default function App() {
           sessionIdRef.current = id
           setActiveSessionId(id)
           localStorage.setItem(SESSION_KEY, id)
-          setMessages((data.messages ?? []) as Message[])
+          // Map server's StoredMessage.images → client's Message.imagePreviews
+          type ServerMsg = { role: string; content: string; timestamp: number; images?: string[] }
+          const mapped: Message[] = ((data.messages ?? []) as ServerMsg[]).map(m => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            timestamp: m.timestamp,
+            ...(m.images && m.images.length > 0 ? { imagePreviews: m.images } : {}),
+          }))
+          setMessages(mapped)
           const live = (data.streaming ?? '') as string
           currentResponseRef.current = live
           setCurrentResponse(live)
@@ -270,6 +286,7 @@ export default function App() {
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
     setCurrentResponse('')
+    setMessages([]) // clear immediately so empty state shows while server loads
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: id }))
     setSidebarOpen(false)
@@ -280,25 +297,51 @@ export default function App() {
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
     setCurrentResponse('')
+    setMessages([]) // clear immediately so empty state shows while server loads
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: null }))
     setSidebarOpen(false)
   }
 
-  const onImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onImagePick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? [])
-    const newImages: PendingImage[] = await Promise.all(
-      files.map(async file => {
-        const [base64, thumbnail] = await Promise.all([readAsBase64(file), createThumbnail(file)])
-        return {
-          preview: URL.createObjectURL(file),
-          thumbnail,
-          input: { base64, mediaType: file.type },
-        }
-      })
-    )
-    setPendingImages(prev => [...prev, ...newImages])
     e.target.value = ''
+    if (files.length === 0) return
+
+    // Add placeholders immediately so user sees preview while uploading
+    const placeholders = files.map(file => ({
+      localId: crypto.randomUUID(),
+      file,
+      preview: URL.createObjectURL(file),
+    }))
+    setPendingImages(prev => [...prev, ...placeholders.map(p => ({
+      localId: p.localId,
+      preview: p.preview,
+      thumbnail: '',
+      uploading: true,
+    }))])
+
+    // Upload each image to server in parallel
+    placeholders.forEach(({ localId, file, preview }) => {
+      Promise.all([readAsBase64(file), createThumbnail(file)])
+        .then(([base64, thumbnail]) =>
+          fetch('/api/upload-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base64, mediaType: file.type, thumbnail }),
+          }).then(r => r.json() as Promise<{ id: string }>)
+            .then(({ id }) => {
+              setPendingImages(prev => prev.map(p =>
+                p.localId === localId ? { ...p, thumbnail, id, uploading: false } : p
+              ))
+            })
+        )
+        .catch(() => {
+          // Upload failed — remove placeholder
+          setPendingImages(prev => prev.filter(p => p.localId !== localId))
+          URL.revokeObjectURL(preview)
+        })
+    })
   }
 
   const removeImage = (idx: number) => {
@@ -310,8 +353,10 @@ export default function App() {
 
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current || !isConnected || isProcessing) return
+    if (pendingImages.some(p => p.uploading)) return // wait for uploads
 
-    const imagePreviews = pendingImages.map(p => p.thumbnail)
+    const readyImages = pendingImages.filter(p => p.id)
+    const imagePreviews = readyImages.map(p => p.thumbnail)
     setMessages(prev => [...prev, { role: 'user', content: input, timestamp: Date.now(), imagePreviews }])
     setIsProcessing(true)
     currentResponseRef.current = ''
@@ -321,7 +366,7 @@ export default function App() {
       type: 'chat',
       message: input,
       sessionId: sessionIdRef.current,
-      ...(pendingImages.length > 0 ? { images: pendingImages.map(p => p.input) } : {}),
+      ...(readyImages.length > 0 ? { imageIds: readyImages.map(p => p.id) } : {}),
     }))
 
     setInput('')
@@ -433,8 +478,21 @@ export default function App() {
           <div className="bg-gray-800 border-t border-gray-700 px-4 py-2 flex-shrink-0">
             <div className="flex items-center gap-2 flex-wrap">
               {pendingImages.map((p, i) => (
-                <div key={i} className="relative">
+                <div key={p.localId} className="relative">
                   <img src={p.preview} alt="" className="h-14 w-14 object-cover rounded-lg" />
+                  {/* Upload status overlay */}
+                  {p.uploading && (
+                    <div className="absolute inset-0 bg-black/50 rounded-lg flex items-center justify-center">
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    </div>
+                  )}
+                  {!p.uploading && p.id && (
+                    <div className="absolute bottom-0.5 right-0.5 w-4 h-4 bg-green-500 rounded-full flex items-center justify-center">
+                      <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                      </svg>
+                    </div>
+                  )}
                   <button onClick={() => removeImage(i)}
                     className="absolute -top-1 -right-1 w-4 h-4 bg-gray-600 hover:bg-red-600 rounded-full text-white text-xs flex items-center justify-center leading-none">
                     ×
@@ -463,7 +521,7 @@ export default function App() {
               className="flex-1 resize-none rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
               rows={2} disabled={!isConnected || isProcessing} />
 
-            <button onClick={sendMessage} disabled={!isConnected || isProcessing || !input.trim()}
+            <button onClick={sendMessage} disabled={!isConnected || isProcessing || !input.trim() || pendingImages.some(p => p.uploading)}
               className="flex-shrink-0 px-4 py-2.5 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors">
               傳送
             </button>

@@ -4,6 +4,7 @@ export interface StoredMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  images?: string[]; // thumbnail data URLs for user messages with attached images
 }
 
 export type SessionStatus = "idle" | "running" | "error";

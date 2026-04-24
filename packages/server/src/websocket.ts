@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
-import { runClaude, type ImageInput } from "./claude.js";
+import { runClaude } from "./claude.js";
+import { getImage } from "./image-store.js";
 import { getSettings } from "./settings.js";
 import { loadMessagesFromDisk } from "./session.js";
 import {
@@ -16,7 +17,7 @@ import {
 type ClientMsg =
   | { type: "ping" }
   | { type: "resume"; sessionId?: string | null }
-  | { type: "chat"; message: string; sessionId?: string | null; images?: ImageInput[] };
+  | { type: "chat"; message: string; sessionId?: string | null; imageIds?: string[] };
 
 function send(ws: WebSocket, obj: unknown): void {
   try { ws.send(JSON.stringify(obj)); } catch { /* ws closed */ }
@@ -55,6 +56,11 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
 
     send(connection, { type: "connected" });
 
+    // Generation counter: incremented each time a resume arrives.
+    // If a newer resume arrives while a disk-load is in flight, the old one
+    // is abandoned so it cannot overwrite the client's newer session choice.
+    let resumeGen = 0;
+
     connection.on("message", async (raw: Buffer) => {
       let msg: ClientMsg;
       try {
@@ -67,13 +73,26 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           break;
 
         case "resume": {
-          let target = msg.sessionId ? getSession(msg.sessionId) : undefined;
-          if (!target && msg.sessionId) {
-            // Load session history from disk (Claude CLI JSONL)
-            const messages = await loadMessagesFromDisk(msg.sessionId);
-            target = loadSession(msg.sessionId, messages);
+          const gen = ++resumeGen;
+          let target: SessionState;
+          if (msg.sessionId) {
+            // Resume specific session — load from store or disk
+            let found = getSession(msg.sessionId);
+            if (!found) {
+              const messages = await loadMessagesFromDisk(msg.sessionId);
+              if (gen !== resumeGen) return; // newer resume arrived while loading
+              found = loadSession(msg.sessionId, messages);
+            }
+            if (gen !== resumeGen) return;
+            target = found;
+          } else {
+            // No session ID = fresh session.
+            // On first resume (no prior subscription) reuse the per-connection
+            // session created at WS open. On subsequent null-resumes (e.g.
+            // clicking 新對話 in the UI) always create a brand-new session.
+            target = unsubscribe ? newSession() : session;
           }
-          subscribeTo(target ?? session);
+          subscribeTo(target);
           sendSessionSnapshot();
           break;
         }
@@ -95,7 +114,18 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
 
           if (!unsubscribe) subscribeTo(session);
 
-          session.messages.push({ role: "user", content: msg.message, timestamp: Date.now() });
+          // Resolve uploaded images from store
+          const resolvedImages = (msg.imageIds ?? [])
+            .map(id => getImage(id))
+            .filter((img): img is NonNullable<typeof img> => img !== undefined);
+          const thumbnails = resolvedImages.map(img => img.thumbnail);
+
+          session.messages.push({
+            role: "user",
+            content: msg.message,
+            timestamp: Date.now(),
+            ...(thumbnails.length > 0 ? { images: thumbnails } : {}),
+          });
           session.streaming = "";
           session.status = "running";
 
@@ -109,11 +139,12 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           // mutable `session` variable, which could be reassigned by a later
           // subscribeTo() call on this same WS connection.
           const activeSession = session;
+          const imageInputs = resolvedImages.map(img => ({ base64: img.base64, mediaType: img.mediaType }));
 
           runClaude(msg.message, activeSession.messages.slice(0, -1), (text) => {
             activeSession.streaming += text;
             broadcast(activeSession, { type: "chunk", text });
-          }, systemPrompt, msg.images)
+          }, systemPrompt, imageInputs.length > 0 ? imageInputs : undefined)
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
               activeSession.messages.push({ role: "assistant", content: activeSession.streaming, timestamp: Date.now() });

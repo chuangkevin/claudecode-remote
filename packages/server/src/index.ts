@@ -6,6 +6,7 @@ import { setupWebSocketHandler } from "./websocket.js";
 import { getSettings, saveSettings } from "./settings.js";
 import { listDiskSessions } from "./session.js";
 import { listSessions } from "./store.js";
+import { storeImage } from "./image-store.js";
 
 const server = Fastify({
   logger: false,
@@ -38,6 +39,19 @@ server.post<{ Body: { systemPrompt?: string } }>("/api/settings", async (req, re
   await saveSettings({ systemPrompt });
   return reply.code(200).send({ ok: true });
 });
+
+// Image upload: stores image in memory, returns ID for use in chat messages
+server.post<{ Body: { base64: string; mediaType: string; thumbnail: string } }>(
+  "/api/upload-image",
+  async (req, reply) => {
+    const { base64, mediaType, thumbnail } = req.body ?? {};
+    if (!base64 || !mediaType || !thumbnail) {
+      return reply.code(400).send({ error: "Missing fields" });
+    }
+    const id = storeImage(base64, mediaType, thumbnail);
+    return { id };
+  }
+);
 
 // Sessions list: in-memory (active) sessions merged with disk sessions
 server.get("/api/sessions", async () => {
