@@ -22,6 +22,8 @@ interface DiskSession {
   id: string
   preview: string
   updatedAt: number
+  name?: string
+  pinned?: boolean
 }
 
 const SESSION_KEY = 'claudecode-session-id'
@@ -114,9 +116,38 @@ interface SidebarProps {
   onSelect: (id: string) => void
   onNew: () => void
   onRefresh: () => void
+  onRename: (id: string, name: string) => Promise<void>
+  onPin: (id: string, pinned: boolean) => Promise<void>
 }
 
-function Sidebar({ sessions, activeId, onSelect, onNew, onRefresh }: SidebarProps) {
+function Sidebar({ sessions, activeId, onSelect, onNew, onRefresh, onRename, onPin }: SidebarProps) {
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const editRef = useRef<HTMLInputElement>(null)
+  const confirmingRef = useRef(false)
+
+  useEffect(() => {
+    if (editingId) editRef.current?.focus()
+  }, [editingId])
+
+  const startEdit = (s: DiskSession, e: React.MouseEvent) => {
+    e.stopPropagation()
+    confirmingRef.current = false
+    setEditingId(s.id)
+    setEditName(s.name ?? s.preview ?? '')
+  }
+
+  const commitEdit = async (id: string) => {
+    confirmingRef.current = true
+    await onRename(id, editName)
+    setEditingId(null)
+    confirmingRef.current = false
+  }
+
+  const cancelEdit = () => {
+    if (!confirmingRef.current) setEditingId(null)
+  }
+
   return (
     <div className="w-64 flex-shrink-0 bg-gray-950 border-r border-gray-800 flex flex-col h-full">
       <div className="px-3 pt-4 pb-2 flex items-center gap-2">
@@ -134,14 +165,81 @@ function Sidebar({ sessions, activeId, onSelect, onNew, onRefresh }: SidebarProp
           <div className="px-4 py-8 text-center text-gray-600 text-xs">尚無對話記錄</div>
         )}
         {sessions.map(s => (
-          <button key={s.id} onClick={() => onSelect(s.id)}
-            className={`w-full text-left px-3 py-2.5 mx-1 rounded-lg transition-colors group ${
-              s.id === activeId ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-            }`}
-            style={{ width: 'calc(100% - 8px)' }}>
-            <div className="text-sm truncate">{s.preview || '新對話'}</div>
-            <div className="text-xs text-gray-600 mt-0.5">{relativeTime(s.updatedAt)}</div>
-          </button>
+          <div key={s.id} className="relative mx-1 mb-0.5" style={{ width: 'calc(100% - 8px)' }}>
+            {editingId === s.id ? (
+              /* ── Inline rename mode ── */
+              <div className="px-3 py-2 rounded-lg bg-gray-700">
+                <input
+                  ref={editRef}
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); void commitEdit(s.id) }
+                    if (e.key === 'Escape') cancelEdit()
+                  }}
+                  onBlur={cancelEdit}
+                  className="w-full bg-gray-600 text-gray-100 text-sm px-2 py-1 rounded border border-blue-500 outline-none"
+                  placeholder="輸入名稱…"
+                />
+                <div className="flex gap-2 mt-1.5">
+                  <button
+                    onMouseDown={e => { e.preventDefault(); void commitEdit(s.id) }}
+                    className="text-xs text-green-400 hover:text-green-300">
+                    ✓ 確認
+                  </button>
+                  <button
+                    onMouseDown={e => { e.preventDefault(); cancelEdit() }}
+                    className="text-xs text-gray-500 hover:text-gray-300">
+                    ✗ 取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* ── Normal row ── */
+              <div className={`flex items-center rounded-lg transition-colors ${
+                s.id === activeId ? 'bg-gray-700' : 'hover:bg-gray-800'
+              }`}>
+                {/* Main click area */}
+                <button
+                  onClick={() => onSelect(s.id)}
+                  className={`flex-1 min-w-0 text-left px-3 py-2.5 ${
+                    s.id === activeId ? 'text-gray-100' : 'text-gray-400 hover:text-gray-200'
+                  }`}>
+                  <div className="flex items-center gap-1 min-w-0">
+                    {s.pinned && (
+                      <span className="text-blue-400 flex-shrink-0 text-xs">📌</span>
+                    )}
+                    <span className="text-sm truncate">{s.name || s.preview || '新對話'}</span>
+                  </div>
+                  <div className="text-xs text-gray-600 mt-0.5">{relativeTime(s.updatedAt)}</div>
+                </button>
+
+                {/* Action buttons — always visible, subtle */}
+                <div className="flex items-center gap-0.5 pr-2 flex-shrink-0">
+                  <button
+                    onClick={e => startEdit(s, e)}
+                    title="重命名"
+                    className="p-1 text-gray-600 hover:text-gray-300 rounded transition-colors">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/>
+                    </svg>
+                  </button>
+                  <button
+                    onClick={e => { e.stopPropagation(); void onPin(s.id, !s.pinned) }}
+                    title={s.pinned ? '取消釘選' : '釘選'}
+                    className={`p-1 rounded transition-colors ${
+                      s.pinned ? 'text-blue-400 hover:text-blue-300' : 'text-gray-600 hover:text-gray-300'
+                    }`}>
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill={s.pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round"
+                        d="M17 3a2 2 0 012 2v1a2 2 0 01-1.268 1.857L16 9.5V16l1 1v1H7v-1l1-1V9.5l-1.732-1.643A2 2 0 015 6V5a2 2 0 012-2h10zM12 16v5"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         ))}
       </div>
     </div>
@@ -180,6 +278,24 @@ export default function App() {
   }, [])
 
   useEffect(() => { void fetchSessions() }, [fetchSessions])
+
+  const renameSession = async (id: string, name: string) => {
+    await fetch(`/api/sessions/${id}/rename`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    void fetchSessions()
+  }
+
+  const pinSession = async (id: string, pinned: boolean) => {
+    await fetch(`/api/sessions/${id}/pin`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned }),
+    })
+    void fetchSessions()
+  }
 
   const resumeSession = useCallback((ws: WebSocket, sessionId: string | null) => {
     ws.send(JSON.stringify({ type: 'resume', sessionId }))
@@ -403,6 +519,8 @@ export default function App() {
           onSelect={switchSession}
           onNew={newSession}
           onRefresh={fetchSessions}
+          onRename={renameSession}
+          onPin={pinSession}
         />
       </div>
 

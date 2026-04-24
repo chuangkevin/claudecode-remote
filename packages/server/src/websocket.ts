@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { runClaude } from "./claude.js";
 import { getImage } from "./image-store.js";
+import { setSessionMeta } from "./settings.js";
 import { getSettings } from "./settings.js";
 import { loadMessagesFromDisk } from "./session.js";
 import {
@@ -151,6 +152,14 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
               activeSession.streaming = "";
               activeSession.status = "idle";
               broadcast(activeSession, { type: "done" });
+              // Persist this session in meta so it survives server restarts.
+              // preview = first user message; updatedAt = now.
+              const firstUser = activeSession.messages.find(m => m.role === "user");
+              void setSessionMeta(activeSession.id, {
+                source: "claudecode-remote",
+                preview: firstUser?.content.replace(/\s+/g, " ").trim().slice(0, 80),
+                updatedAt: activeSession.lastRunFinishedAt,
+              });
             })
             .catch((err: Error) => {
               activeSession.lastRunFinishedAt = Date.now();

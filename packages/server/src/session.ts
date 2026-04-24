@@ -9,6 +9,8 @@ export interface DiskSession {
   id: string;
   preview: string;   // first user message, truncated
   updatedAt: number; // file mtime ms
+  name?: string;     // user-assigned custom name
+  pinned?: boolean;  // pinned sessions sort to top
 }
 
 // ── JSONL helpers ─────────────────────────────────────────────────────────────

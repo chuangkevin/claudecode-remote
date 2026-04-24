@@ -40,3 +40,12 @@ Thumbs.db
 
 # Misc
 .cache/
+
+# Playwright
+playwright-report/
+test-results/
+test-result.png
+
+# Claude Code worktrees
+.claude/worktrees/
+null
