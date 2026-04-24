@@ -41,8 +41,10 @@ server.post<{ Body: { systemPrompt?: string } }>("/api/settings", async (req, re
 });
 
 // Image upload: stores image in memory, returns ID for use in chat messages
+// bodyLimit: 25MB — 2048px JPEG in base64 can be ~3-4MB; phone photos up to ~12MB
 server.post<{ Body: { base64: string; mediaType: string; thumbnail: string } }>(
   "/api/upload-image",
+  { bodyLimit: 25 * 1024 * 1024 },
   async (req, reply) => {
     const { base64, mediaType, thumbnail } = req.body ?? {};
     if (!base64 || !mediaType || !thumbnail) {

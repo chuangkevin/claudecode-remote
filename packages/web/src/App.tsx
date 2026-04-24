@@ -15,6 +15,7 @@ interface PendingImage {
   thumbnail: string  // small data URL shown after upload completes
   id?: string        // server-assigned ID after upload
   uploading: boolean
+  error?: boolean    // true if upload failed
 }
 
 interface DiskSession {
@@ -28,34 +29,37 @@ const ACCEPTED = 'image/jpeg,image/png,image/gif,image/webp'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function readAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve((r.result as string).split(',')[1] ?? '')
-    r.onerror = reject
-    r.readAsDataURL(file)
-  })
-}
-
-// Creates a small JPEG thumbnail (≤160px) as a data URL.
-// Full-res base64 data URLs from iPhone photos can be 10MB+ and fail silently
-// in iOS Safari img tags — a canvas-scaled thumbnail avoids this.
-function createThumbnail(file: File, maxPx = 160): Promise<string> {
+// Single-pass image processor: loads the image once, derives both the AI copy
+// (max 2048px JPEG) and the display thumbnail (max 160px JPEG).
+// Loading twice (readAsBase64 + createThumbnail separately) doubles memory
+// pressure and causes silent failures on iOS with large photos.
+function processImageFile(
+  file: File,
+  aiMaxPx = 2048,
+  thumbMaxPx = 160,
+): Promise<{ aiBase64: string; thumbnail: string }> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file)
     const img = new Image()
     img.onload = () => {
       URL.revokeObjectURL(url)
-      const scale = Math.min(maxPx / img.width, maxPx / img.height, 1)
-      const w = Math.max(1, Math.round(img.width * scale))
-      const h = Math.max(1, Math.round(img.height * scale))
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      canvas.getContext('2d')?.drawImage(img, 0, 0, w, h)
-      resolve(canvas.toDataURL('image/jpeg', 0.8))
+
+      function scaleCanvas(maxPx: number): HTMLCanvasElement {
+        const scale = Math.min(maxPx / img.width, maxPx / img.height, 1)
+        const w = Math.max(1, Math.round(img.width * scale))
+        const h = Math.max(1, Math.round(img.height * scale))
+        const c = document.createElement('canvas')
+        c.width = w; c.height = h
+        c.getContext('2d')?.drawImage(img, 0, 0, w, h)
+        return c
+      }
+
+      const aiCanvas = scaleCanvas(aiMaxPx)
+      const aiBase64 = aiCanvas.toDataURL('image/jpeg', 0.9).split(',')[1] ?? ''
+      const thumbnail = scaleCanvas(thumbMaxPx).toDataURL('image/jpeg', 0.8)
+      resolve({ aiBase64, thumbnail })
     }
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('thumbnail failed')) }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image load failed')) }
     img.src = url
   })
 }
@@ -322,24 +326,26 @@ export default function App() {
     }))])
 
     // Upload each image to server in parallel
-    placeholders.forEach(({ localId, file, preview }) => {
-      Promise.all([readAsBase64(file), createThumbnail(file)])
-        .then(([base64, thumbnail]) =>
+    placeholders.forEach(({ localId, file }) => {
+      processImageFile(file)
+        .then(({ aiBase64, thumbnail }) =>
           fetch('/api/upload-image', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base64, mediaType: file.type, thumbnail }),
-          }).then(r => r.json() as Promise<{ id: string }>)
-            .then(({ id }) => {
-              setPendingImages(prev => prev.map(p =>
-                p.localId === localId ? { ...p, thumbnail, id, uploading: false } : p
-              ))
-            })
+            body: JSON.stringify({ base64: aiBase64, mediaType: 'image/jpeg', thumbnail }),
+          }).then(async r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`)
+            const { id } = await r.json() as { id: string }
+            setPendingImages(prev => prev.map(p =>
+              p.localId === localId ? { ...p, thumbnail, id, uploading: false } : p
+            ))
+          })
         )
         .catch(() => {
-          // Upload failed — remove placeholder
-          setPendingImages(prev => prev.filter(p => p.localId !== localId))
-          URL.revokeObjectURL(preview)
+          // Mark as failed — keep visible so user knows it didn't upload
+          setPendingImages(prev => prev.map(p =>
+            p.localId === localId ? { ...p, uploading: false, error: true } : p
+          ))
         })
     })
   }
@@ -353,9 +359,9 @@ export default function App() {
 
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current || !isConnected || isProcessing) return
-    if (pendingImages.some(p => p.uploading)) return // wait for uploads
+    if (pendingImages.some(p => p.uploading)) return // wait for all uploads
 
-    const readyImages = pendingImages.filter(p => p.id)
+    const readyImages = pendingImages.filter(p => p.id && !p.error)
     const imagePreviews = readyImages.map(p => p.thumbnail)
     setMessages(prev => [...prev, { role: 'user', content: input, timestamp: Date.now(), imagePreviews }])
     setIsProcessing(true)
@@ -486,7 +492,12 @@ export default function App() {
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                     </div>
                   )}
-                  {!p.uploading && p.id && (
+                  {!p.uploading && p.error && (
+                    <div className="absolute inset-0 bg-red-900/70 rounded-lg flex items-center justify-center" title="上傳失敗，請移除後重試">
+                      <span className="text-white text-lg font-bold">!</span>
+                    </div>
+                  )}
+                  {!p.uploading && !p.error && p.id && (
                     <div className="absolute bottom-0.5 right-0.5 w-4 h-4 bg-green-500 rounded-full flex items-center justify-center">
                       <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
