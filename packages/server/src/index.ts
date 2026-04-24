@@ -3,6 +3,7 @@ import fastifyWebsocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import { config } from "./config.js";
 import { setupWebSocketHandler } from "./websocket.js";
+import { getSettings, saveSettings } from "./settings.js";
 
 const server = Fastify({
   logger: false,
@@ -23,6 +24,17 @@ await server.register(fastifyStatic, {
 // Health check
 server.get("/api/health", async () => {
   return { status: "ok", version: "0.1.0" };
+});
+
+// Settings
+server.get("/api/settings", async () => {
+  return getSettings();
+});
+
+server.post<{ Body: { systemPrompt?: string } }>("/api/settings", async (req, reply) => {
+  const { systemPrompt = "" } = req.body ?? {};
+  await saveSettings({ systemPrompt });
+  return reply.code(200).send({ ok: true });
 });
 
 // 啟動 server

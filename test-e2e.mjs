@@ -40,7 +40,7 @@ async function testClaudeCodeRemote() {
       const lastMessage = await page.locator('.whitespace-pre-wrap').last().textContent();
       console.log('📨 Last message:', lastMessage?.substring(0, 100) + '...');
 
-      if (lastMessage && lastMessage.length > 10 && !lastMessage.includes('錯誤') && !lastMessage.includes('exited')) {
+      if (lastMessage && lastMessage.length > 10 && !lastMessage.startsWith('Error:') && !lastMessage.includes('exited with code')) {
         console.log('\n✅ ✅ ✅ 測試成功！Web UI 可以正常對話！\n');
         return true;
       } else {

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
-import { runClaude } from "./claude.js";
+import { runClaude, type ImageInput } from "./claude.js";
+import { getSettings } from "./settings.js";
 import {
   newSession,
   getSession,
@@ -12,7 +13,7 @@ import {
 type ClientMsg =
   | { type: "ping" }
   | { type: "resume"; sessionId?: string | null }
-  | { type: "chat"; message: string; sessionId?: string | null };
+  | { type: "chat"; message: string; sessionId?: string | null; image?: ImageInput };
 
 function send(ws: WebSocket, obj: unknown): void {
   try { ws.send(JSON.stringify(obj)); } catch { /* ws closed */ }
@@ -52,7 +53,7 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
     // Announce connection; client should immediately reply with 'resume'
     send(connection, { type: "connected" });
 
-    connection.on("message", (raw: Buffer) => {
+    connection.on("message", async (raw: Buffer) => {
       let msg: ClientMsg;
       try {
         msg = JSON.parse(raw.toString()) as ClientMsg;
@@ -92,11 +93,14 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           session.streaming = "";
           session.status = "running";
 
+          // Load system prompt fresh on each call so UI changes take effect immediately
+          const { systemPrompt } = await getSettings();
+
           // Fire-and-forget — CLI keeps running even if WebSocket closes
           runClaude(msg.message, session.id, (text) => {
             session.streaming += text;
             broadcast(session, { type: "chunk", text });
-          })
+          }, systemPrompt, msg.image)
             .then(() => {
               session.messages.push({
                 role: "assistant",
