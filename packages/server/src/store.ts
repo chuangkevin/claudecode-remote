@@ -43,7 +43,10 @@ export function newSession(): SessionState {
 export function loadSession(id: string, messages: StoredMessage[]): SessionState {
   const existing = sessions.get(id);
   if (existing) return existing;
-  const state: SessionState = { id, messages, streaming: "", status: "idle", lastRunFinishedAt: 0, subscribers: new Set() };
+  // If loading from DB and last message is from assistant, mark as finished
+  const lastMsg = messages[messages.length - 1];
+  const lastRunFinishedAt = lastMsg?.role === "assistant" ? lastMsg.timestamp : 0;
+  const state: SessionState = { id, messages, streaming: "", status: "idle", lastRunFinishedAt, subscribers: new Set() };
   sessions.set(id, state);
   return state;
 }

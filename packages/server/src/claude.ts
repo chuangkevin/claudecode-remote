@@ -10,7 +10,9 @@ export interface ImageInput {
 
 // ── Process pool ──────────────────────────────────────────────────────────────
 
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const IDLE_TIMEOUT_MS = process.env.TEST_IDLE_TIMEOUT_MS
+  ? Number.parseInt(process.env.TEST_IDLE_TIMEOUT_MS, 10)
+  : 5 * 60 * 1000; // 5 minutes (overridable for tests)
 
 interface ManagedProcess {
   child: ChildProcess;
@@ -318,14 +320,23 @@ export function runClaude(
     p.emittedLength = 0;
     p.thinkingEmittedLength = 0;
 
-    const isFirst = p.messageCount === 0;
+    // Include history only on the very first message of a freshly spawned process.
+    // This ensures reconnected sessions still have full context after the CLI
+    // process was killed (idle timeout or crash) and respawned.
+    const isFirstMessageOfNewProcess = p.messageCount === 0;
     p.messageCount++;
 
     const includeSystemPrompt = !p.promptSent;
     if (includeSystemPrompt) p.promptSent = true;
 
     const effectivePrompt = resolveSystemPrompt(systemPrompt);
-    const text = buildMessageText(userMessage, effectivePrompt, previousMessages, includeSystemPrompt, isFirst);
+    const text = buildMessageText(
+      userMessage,
+      effectivePrompt,
+      previousMessages,
+      includeSystemPrompt,
+      isFirstMessageOfNewProcess,
+    );
 
     const content = images && images.length > 0
       ? [

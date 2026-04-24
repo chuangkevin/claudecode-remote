@@ -2,9 +2,9 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { runClaude } from "./claude.js";
 import { getImage } from "./image-store.js";
-import { setSessionMeta } from "./settings.js";
 import { getSettings } from "./settings.js";
-import { loadMessagesFromDisk } from "./session.js";
+import { dbUpsertSession, dbInsertMessage, dbLoadMessages } from "./db.js";
+import type { StoredMessage } from "./store.js";
 import {
   newSession,
   getSession,
@@ -47,12 +47,17 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
     }
 
     function sendSessionSnapshot(): void {
+      // Fix: if streaming is empty and last run finished, status should be idle.
+      // This prevents stuck "processing" state when client reconnects after AI finished.
+      const actualStatus = session.streaming === "" && session.lastRunFinishedAt > 0
+        ? "idle"
+        : session.status;
       send(connection, {
         type: "session",
         sessionId: session.id,
         messages: session.messages,
         streaming: session.streaming,
-        status: session.status,
+        status: actualStatus,
       });
     }
 
@@ -78,12 +83,17 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           const gen = ++resumeGen;
           let target: SessionState;
           if (msg.sessionId) {
-            // Resume specific session — load from store or disk
+            // Resume specific session — load from store or DB
             let found = getSession(msg.sessionId);
             if (!found) {
-              const messages = await loadMessagesFromDisk(msg.sessionId);
-              if (gen !== resumeGen) return; // newer resume arrived while loading
-              found = loadSession(msg.sessionId, messages);
+              const msgs: StoredMessage[] = dbLoadMessages(msg.sessionId).map(m => ({
+                role: m.role as "user" | "assistant",
+                content: m.content,
+                timestamp: m.created_at,
+                ...(m.images_json ? { images: JSON.parse(m.images_json) as string[] } : {}),
+              }));
+              if (gen !== resumeGen) return;
+              found = loadSession(msg.sessionId, msgs);
             }
             if (gen !== resumeGen) return;
             target = found;
@@ -103,8 +113,13 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           if (msg.sessionId && msg.sessionId !== session.id) {
             let target = getSession(msg.sessionId);
             if (!target) {
-              const messages = await loadMessagesFromDisk(msg.sessionId);
-              target = loadSession(msg.sessionId, messages);
+              const msgs: StoredMessage[] = dbLoadMessages(msg.sessionId).map(m => ({
+                role: m.role as "user" | "assistant",
+                content: m.content,
+                timestamp: m.created_at,
+                ...(m.images_json ? { images: JSON.parse(m.images_json) as string[] } : {}),
+              }));
+              target = loadSession(msg.sessionId, msgs);
             }
             subscribeTo(target);
           }
@@ -122,21 +137,34 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             .filter((img): img is NonNullable<typeof img> => img !== undefined);
           const thumbnails = resolvedImages.map(img => img.thumbnail);
 
-          session.messages.push({
-            role: "user",
+          const userMsg = {
+            role: "user" as const,
             content: msg.message,
             timestamp: Date.now(),
             ...(thumbnails.length > 0 ? { images: thumbnails } : {}),
-          });
+          };
+          session.messages.push(userMsg);
           session.streaming = "";
           session.status = "running";
 
-          const { systemPrompt } = await getSettings();
-
-          // Snapshot session reference — fire-and-forget must not capture the
-          // mutable `session` variable, which could be reassigned by a later
+          // Snapshot session reference before any async yield — must not capture
+          // the mutable `session` variable which could be reassigned by a later
           // subscribeTo() call on this same WS connection.
           const activeSession = session;
+
+          // Persist user message to DB — best-effort, must not block runClaude
+          const firstUserContent = activeSession.messages.find(m => m.role === "user")?.content
+            .replace(/\s+/g, " ").trim().slice(0, 80);
+          try {
+            dbUpsertSession(activeSession.id, { preview: firstUserContent });
+            dbInsertMessage(activeSession.id, "user", msg.message, thumbnails.length > 0 ? thumbnails : undefined);
+          } catch (dbErr) {
+            console.error("[ws] DB write error (user msg):", dbErr);
+          }
+
+          let systemPrompt = "";
+          try { ({ systemPrompt } = await getSettings()); } catch { /* use default */ }
+
           const imageInputs = resolvedImages.map(img => ({ base64: img.base64, mediaType: img.mediaType }));
 
           runClaude(activeSession.id, msg.message, activeSession.messages.slice(0, -1), (text) => {
@@ -147,18 +175,17 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           })
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
-              activeSession.messages.push({ role: "assistant", content: activeSession.streaming, timestamp: Date.now() });
+              const content = activeSession.streaming;
+              activeSession.messages.push({ role: "assistant", content, timestamp: Date.now() });
               activeSession.streaming = "";
               activeSession.status = "idle";
               broadcast(activeSession, { type: "done" });
-              // Persist this session in meta so it survives server restarts.
-              // preview = first user message; updatedAt = now.
-              const firstUser = activeSession.messages.find(m => m.role === "user");
-              void setSessionMeta(activeSession.id, {
-                source: "claudecode-remote",
-                preview: firstUser?.content.replace(/\s+/g, " ").trim().slice(0, 80),
-                updatedAt: activeSession.lastRunFinishedAt,
-              });
+              try {
+                dbInsertMessage(activeSession.id, "assistant", content);
+                dbUpsertSession(activeSession.id, { updatedAt: activeSession.lastRunFinishedAt });
+              } catch (dbErr) {
+                console.error("[ws] DB write error (assistant msg):", dbErr);
+              }
             })
             .catch((err: Error) => {
               activeSession.lastRunFinishedAt = Date.now();
@@ -167,6 +194,11 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
               activeSession.streaming = "";
               activeSession.status = "error";
               broadcast(activeSession, { type: "error", message });
+              try {
+                dbInsertMessage(activeSession.id, "assistant", `Error: ${message}`);
+              } catch (dbErr) {
+                console.error("[ws] DB write error (error msg):", dbErr);
+              }
             });
           break;
         }

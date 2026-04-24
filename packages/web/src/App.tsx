@@ -408,6 +408,9 @@ export default function App() {
           const live = (data.streaming ?? '') as string
           currentResponseRef.current = live
           setCurrentResponse(live)
+          // Clear thinking state on session resume (reconnect or switch)
+          currentThinkingRef.current = ''
+          setCurrentThinking('')
           setIsProcessing(data.status === 'running')
           break
         }
