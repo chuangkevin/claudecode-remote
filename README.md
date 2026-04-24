@@ -1,84 +1,81 @@
 # claudecode-remote
 
-Web 介面讓使用者可以在多裝置上存取並繼續 Claude Code 對話。
+Web 介面讓使用者可以在任何裝置上存取 Claude Code CLI，支援即時對話、圖片上傳與 session 管理。
 
-## 功能
+## 目前功能
 
-- 多裝置共享 Claude Code CLI session
-- 完整對話功能與工具呼叫支援
-- Session 管理（載入/儲存 .jsonl 格式）
-- 即時 WebSocket 通訊
-- 支援所有主要工具：Bash, Read, Write, Edit, Grep, Glob
+### 核心對話
+- 繁體中文優先回覆；使用 Claude Code CLI（`--no-session-persistence`）避免 Windows session lock
+- 對話歷史以文字前綴方式注入，跨 turn 保持完整上下文
+- 即時 WebSocket 串流（chunk-by-chunk 顯示）
+
+### 圖片上傳
+- 選圖後立刻 POST 上傳（`/api/upload-image`）；顯示上傳進度 → 綠勾
+- 單次解碼：同時產生 AI 用版本（最大 2048px JPEG）與縮圖（160px），減少 iOS 記憶體壓力
+- 上傳失敗顯示紅色 `!` 標記（不自動移除），bodyLimit 25MB 避免手機大圖被截斷
+- 圖片縮圖存入 `StoredMessage.images`，session resume 時帶回，切換/重整不遺失
+
+### Session 管理
+- 側邊欄列出所有 claudecode-remote 建立的 session（不混入 Dispatch/其他工具的 JSONL）
+- **重命名**：每個 session 旁 ✏ 按鈕 → inline 輸入框，Enter 確認，Esc 取消
+- **釘選**：📌 按鈕切換，釘選 session 排在最上面，帶藍色圖示
+- 名稱 / 釘選狀態持久化到 `~/.claude/claudecode-remote.json`
+- Session 在 server 重啟後仍列於側邊欄（透過 `sessionMeta` 的 `source: 'claudecode-remote'` marker）
+
+### UI / UX
+- 深色主題（Tailwind CSS）；響應式設計，375px 手機可用
+- 側邊欄手機版：滑出式覆蓋；背景遮罩點擊關閉
+- 斷線自動重連（1.5s 延遲）；iOS zombie WS 偵測（ping-pong）
+- System Prompt 設定面板（跨 session 生效）
+
+### 測試
+- `tests/e2e.spec.ts`：12 個 Playwright E2E 情境（頁面載入、對話、工具呼叫、圖片、session 切換、行動版、斷線重連、壓力測試）
+- `test-ws.mjs`：9 個 WebSocket 整合測試
 
 ## 技術堆疊
 
-- **後端**: Node.js + TypeScript + Fastify + WebSocket
+- **後端**: Node.js + TypeScript + Fastify + `@fastify/websocket`
 - **前端**: React + TypeScript + Vite + Tailwind CSS
-- **API**: Claude API (Anthropic)
-
-## 安裝
-
-```bash
-# 安裝依賴
-npm install
-
-# 設定環境變數
-cp .env.example .env
-# 編輯 .env 填入您的 API key
-```
-
-## 開發
-
-```bash
-# 啟動開發伺服器（前後端同時啟動）
-npm run dev
-
-# 分別啟動
-npm run dev:server  # 後端 (port 9224)
-npm run dev:web     # 前端 (port 5173)
-```
-
-## 建置
-
-```bash
-# 建置所有套件
-npm run build
-
-# 啟動生產環境
-npm start
-```
-
-## 環境變數
-
-- `PORT`: 伺服器埠號（預設：9224）
-- `HOST`: 伺服器位址（預設：0.0.0.0）
-- `ANTHROPIC_API_KEY`: Claude API 金鑰（必填）
-- `CLAUDE_DATA_DIR`: Claude CLI 資料目錄（預設：~/.claude）
-- `WORKSPACE_ROOT`: 工作區根目錄（預設：目前目錄）
+- **CLI**: Claude Code CLI（`claude --print --output-format stream-json`）
 
 ## 架構
 
 ```
 claudecode-remote/
 ├── packages/
-│   ├── server/          # Fastify 後端
-│   │   ├── src/
-│   │   │   ├── index.ts      # 伺服器入口
-│   │   │   ├── config.ts     # 設定管理
-│   │   │   ├── claude.ts     # Claude API 整合
-│   │   │   ├── websocket.ts  # WebSocket 處理
-│   │   │   ├── session.ts    # Session 管理
-│   │   │   └── tools/        # 工具實作
-│   │   └── package.json
-│   └── web/             # React 前端
-│       ├── src/
-│       │   ├── App.tsx       # 主要元件
-│       │   ├── main.tsx      # 入口點
-│       │   └── index.css     # 樣式
-│       └── package.json
-└── openspec/
-    └── config.yaml      # 專案規格
+│   ├── server/src/
+│   │   ├── index.ts        # Fastify 入口、REST API
+│   │   ├── websocket.ts    # WebSocket handler（chat / resume / ping）
+│   │   ├── claude.ts       # CLI 封裝、history injection、processImage
+│   │   ├── store.ts        # 記憶體 session store
+│   │   ├── session.ts      # 磁碟 JSONL 讀取（resume 用）
+│   │   ├── settings.ts     # 持久化設定 + sessionMeta（名稱/釘選/source）
+│   │   ├── image-store.ts  # 上傳圖片暫存（ID → base64 + thumbnail）
+│   │   └── config.ts       # 環境變數
+│   └── web/src/
+│       └── App.tsx         # 單檔 React SPA（Sidebar + Chat + Settings）
+├── tests/e2e.spec.ts       # Playwright 12-scenario E2E
+├── test-ws.mjs             # WebSocket 整合測試
+└── openspec/specs/mvp/spec.md  # 功能規格與 Roadmap
 ```
+
+## 啟動
+
+```bash
+npm install
+npm run build
+node packages/server/dist/index.js
+# 開啟 http://localhost:9224
+```
+
+## 環境變數
+
+| 變數 | 預設 | 說明 |
+|---|---|---|
+| `PORT` | 9224 | 伺服器埠號 |
+| `HOST` | 0.0.0.0 | 監聽位址 |
+| `WORKSPACE_ROOT` | `process.cwd()` | Claude CLI 工作目錄 |
+| `CLAUDE_DATA_DIR` | `~/.claude` | Claude 資料目錄 |
 
 ## License
 
