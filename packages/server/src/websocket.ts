@@ -10,7 +10,6 @@ import {
   getSession,
   loadSession,
   broadcast,
-  cooldownRemaining,
   type SessionState,
   type SessionEvent,
 } from "./store.js";
@@ -132,17 +131,13 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
 
           const { systemPrompt } = await getSettings();
 
-          // Respect CLI session-lock cooldown to avoid "session already in use"
-          const wait = cooldownRemaining(session);
-          if (wait > 0) await new Promise(r => setTimeout(r, wait));
-
           // Snapshot session reference — fire-and-forget must not capture the
           // mutable `session` variable, which could be reassigned by a later
           // subscribeTo() call on this same WS connection.
           const activeSession = session;
           const imageInputs = resolvedImages.map(img => ({ base64: img.base64, mediaType: img.mediaType }));
 
-          runClaude(msg.message, activeSession.messages.slice(0, -1), (text) => {
+          runClaude(activeSession.id, msg.message, activeSession.messages.slice(0, -1), (text) => {
             activeSession.streaming += text;
             broadcast(activeSession, { type: "chunk", text });
           }, systemPrompt, imageInputs.length > 0 ? imageInputs : undefined)

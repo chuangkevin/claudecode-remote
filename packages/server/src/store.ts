@@ -47,11 +47,6 @@ export function loadSession(id: string, messages: StoredMessage[]): SessionState
   return state;
 }
 
-/** Returns ms to wait before the next CLI run is safe (0 = ready now). */
-export function cooldownRemaining(session: SessionState, minGapMs = 500): number {
-  const elapsed = Date.now() - session.lastRunFinishedAt;
-  return Math.max(0, minGapMs - elapsed);
-}
 
 export function getSession(id: string): SessionState | undefined {
   return sessions.get(id);
