@@ -1,163 +1,124 @@
-import { readFile, writeFile, readdir, stat, mkdir } from "fs/promises";
-import { join, resolve } from "path";
-import { existsSync } from "fs";
-import { randomUUID } from "crypto";
-import { config } from "./config.js";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { StoredMessage } from "./store.js";
 
-export interface SessionMessage {
-  role: "user" | "assistant";
-  content: string | Array<{ type: string; text?: string; [key: string]: any }>;
-  timestamp?: number;
-}
+const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
-export interface Session {
+export interface DiskSession {
   id: string;
-  projectPath: string;
-  messages: SessionMessage[];
-  createdAt: number;
-  updatedAt: number;
+  preview: string;   // first user message, truncated
+  updatedAt: number; // file mtime ms
 }
 
-function getProjectsDir(): string {
-  return join(config.claudeDataDir, "projects");
+// ── JSONL helpers ─────────────────────────────────────────────────────────────
+
+function extractText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as Array<{ type?: string; text?: string }>)
+      .filter(b => b.type === "text")
+      .map(b => b.text ?? "")
+      .join("");
+  }
+  return "";
 }
 
-function getProjectDir(projectPath: string): string {
-  const normalized = projectPath.replace(/[:\\\/]/g, "-");
-  return join(getProjectsDir(), normalized);
+interface JournalEntry {
+  type: string;
+  message?: { role?: string; content?: unknown };
+  timestamp?: string;
 }
 
-export async function listSessions(): Promise<string[]> {
-  try {
-    const projectsDir = getProjectsDir();
-    if (!existsSync(projectsDir)) {
-      return [];
-    }
+function parseJournal(raw: string): StoredMessage[] {
+  const messages: StoredMessage[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry: JournalEntry;
+    try { entry = JSON.parse(trimmed) as JournalEntry; } catch { continue; }
 
-    const dirs = await readdir(projectsDir);
-    const sessions: string[] = [];
-
-    for (const dir of dirs) {
-      const projectDir = join(projectsDir, dir);
-      const projectStat = await stat(projectDir);
-      if (projectStat.isDirectory()) {
-        const files = await readdir(projectDir);
-        for (const file of files) {
-          if (file.endsWith(".jsonl")) {
-            const sessionId = file.replace(".jsonl", "");
-            sessions.push(sessionId);
-          }
-        }
+    if (entry.type === "user" && entry.message?.role === "user") {
+      const text = extractText(entry.message.content).trim();
+      if (text) {
+        messages.push({
+          role: "user",
+          content: text,
+          timestamp: entry.timestamp ? Date.parse(entry.timestamp) : Date.now(),
+        });
+      }
+    } else if (entry.type === "assistant" && entry.message?.role === "assistant") {
+      const text = extractText(entry.message.content).trim();
+      if (text) {
+        messages.push({
+          role: "assistant",
+          content: text,
+          timestamp: entry.timestamp ? Date.parse(entry.timestamp) : Date.now(),
+        });
       }
     }
+  }
+  return messages;
+}
 
-    return sessions;
-  } catch (error) {
-    console.error("Failed to list sessions:", error);
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export async function listDiskSessions(): Promise<DiskSession[]> {
+  const sessions: DiskSession[] = [];
+  let projectDirs: string[];
+  try {
+    projectDirs = await readdir(PROJECTS_DIR);
+  } catch {
     return [];
   }
-}
 
-export async function loadSession(
-  sessionId: string,
-  projectPath?: string
-): Promise<Session | null> {
-  try {
-    const searchPath = projectPath ? getProjectDir(projectPath) : getProjectsDir();
+  for (const dir of projectDirs) {
+    const dirPath = join(PROJECTS_DIR, dir);
+    let files: string[];
+    try {
+      const s = await stat(dirPath);
+      if (!s.isDirectory()) continue;
+      files = await readdir(dirPath);
+    } catch { continue; }
 
-    let sessionFilePath: string | null = null;
-
-    if (projectPath) {
-      const filePath = join(searchPath, `${sessionId}.jsonl`);
-      if (existsSync(filePath)) {
-        sessionFilePath = filePath;
-      }
-    } else {
-      const dirs = await readdir(searchPath);
-      for (const dir of dirs) {
-        const filePath = join(searchPath, dir, `${sessionId}.jsonl`);
-        if (existsSync(filePath)) {
-          sessionFilePath = filePath;
-          break;
-        }
-      }
-    }
-
-    if (!sessionFilePath) {
-      return null;
-    }
-
-    const content = await readFile(sessionFilePath, "utf-8");
-    const lines = content.trim().split("\n");
-    const messages: SessionMessage[] = [];
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const id = file.slice(0, -6); // strip .jsonl
+      const filePath = join(dirPath, file);
       try {
-        const msg = JSON.parse(line);
-        messages.push(msg);
-      } catch (error) {
-        console.error("Failed to parse session line:", error);
-      }
+        const fileStat = await stat(filePath);
+        // Read only first 4 KB for preview (avoid loading huge files)
+        const fd = await readFile(filePath, { encoding: "utf8" });
+        const firstLines = fd.slice(0, 4096).split("\n");
+        let preview = "";
+        for (const line of firstLines) {
+          if (!line.trim()) continue;
+          let e: JournalEntry;
+          try { e = JSON.parse(line) as JournalEntry; } catch { continue; }
+          if (e.type === "user" && e.message?.role === "user") {
+            preview = extractText(e.message.content).replace(/\s+/g, " ").trim().slice(0, 80);
+            break;
+          }
+        }
+        sessions.push({ id, preview: preview || id, updatedAt: fileStat.mtimeMs });
+      } catch { continue; }
     }
-
-    const fileStat = await stat(sessionFilePath);
-
-    return {
-      id: sessionId,
-      projectPath: projectPath || config.workspaceRoot,
-      messages,
-      createdAt: fileStat.birthtimeMs,
-      updatedAt: fileStat.mtimeMs,
-    };
-  } catch (error) {
-    console.error("Failed to load session:", error);
-    return null;
-  }
-}
-
-export async function saveMessage(
-  sessionId: string,
-  projectPath: string,
-  message: SessionMessage
-): Promise<void> {
-  try {
-    const projectDir = getProjectDir(projectPath);
-    if (!existsSync(projectDir)) {
-      await mkdir(projectDir, { recursive: true });
-    }
-
-    const sessionFilePath = join(projectDir, `${sessionId}.jsonl`);
-    const messageLine = JSON.stringify({
-      ...message,
-      timestamp: message.timestamp || Date.now(),
-    }) + "\n";
-
-    await writeFile(sessionFilePath, messageLine, {
-      flag: "a",
-      encoding: "utf-8",
-    });
-  } catch (error) {
-    console.error("Failed to save message:", error);
-    throw error;
-  }
-}
-
-export async function createSession(projectPath: string): Promise<string> {
-  const sessionId = generateSessionId();
-  const projectDir = getProjectDir(projectPath);
-
-  if (!existsSync(projectDir)) {
-    await mkdir(projectDir, { recursive: true });
   }
 
-  const sessionFilePath = join(projectDir, `${sessionId}.jsonl`);
-  await writeFile(sessionFilePath, "", "utf-8");
-
-  return sessionId;
+  // Sort newest first
+  return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-function generateSessionId(): string {
-  // 使用 randomUUID() 生成標準 UUID
-  return randomUUID();
+export async function loadMessagesFromDisk(sessionId: string): Promise<StoredMessage[]> {
+  let projectDirs: string[];
+  try { projectDirs = await readdir(PROJECTS_DIR); } catch { return []; }
+
+  for (const dir of projectDirs) {
+    const filePath = join(PROJECTS_DIR, dir, `${sessionId}.jsonl`);
+    try {
+      const raw = await readFile(filePath, "utf8");
+      return parseJournal(raw);
+    } catch { continue; }
+  }
+  return [];
 }

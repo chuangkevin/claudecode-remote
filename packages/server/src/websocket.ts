@@ -2,9 +2,11 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { runClaude, type ImageInput } from "./claude.js";
 import { getSettings } from "./settings.js";
+import { loadMessagesFromDisk } from "./session.js";
 import {
   newSession,
   getSession,
+  loadSession,
   broadcast,
   type SessionState,
   type SessionEvent,
@@ -13,7 +15,7 @@ import {
 type ClientMsg =
   | { type: "ping" }
   | { type: "resume"; sessionId?: string | null }
-  | { type: "chat"; message: string; sessionId?: string | null; image?: ImageInput };
+  | { type: "chat"; message: string; sessionId?: string | null; images?: ImageInput[] };
 
 function send(ws: WebSocket, obj: unknown): void {
   try { ws.send(JSON.stringify(obj)); } catch { /* ws closed */ }
@@ -50,16 +52,13 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
       });
     }
 
-    // Announce connection; client should immediately reply with 'resume'
     send(connection, { type: "connected" });
 
     connection.on("message", async (raw: Buffer) => {
       let msg: ClientMsg;
       try {
         msg = JSON.parse(raw.toString()) as ClientMsg;
-      } catch {
-        return;
-      }
+      } catch { return; }
 
       switch (msg.type) {
         case "ping":
@@ -67,17 +66,25 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           break;
 
         case "resume": {
-          const existing = msg.sessionId ? getSession(msg.sessionId) : undefined;
-          subscribeTo(existing ?? session);
+          let target = msg.sessionId ? getSession(msg.sessionId) : undefined;
+          if (!target && msg.sessionId) {
+            // Load session history from disk (Claude CLI JSONL)
+            const messages = await loadMessagesFromDisk(msg.sessionId);
+            target = loadSession(msg.sessionId, messages);
+          }
+          subscribeTo(target ?? session);
           sendSessionSnapshot();
           break;
         }
 
         case "chat": {
-          // Switch session if the client provides a different ID
           if (msg.sessionId && msg.sessionId !== session.id) {
-            const existing = getSession(msg.sessionId);
-            if (existing) subscribeTo(existing);
+            let target = getSession(msg.sessionId);
+            if (!target) {
+              const messages = await loadMessagesFromDisk(msg.sessionId);
+              target = loadSession(msg.sessionId, messages);
+            }
+            subscribeTo(target);
           }
 
           if (session.status === "running") {
@@ -85,39 +92,28 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             return;
           }
 
-          // Ensure this connection is subscribed
           if (!unsubscribe) subscribeTo(session);
 
-          const userMsg = { role: "user" as const, content: msg.message, timestamp: Date.now() };
-          session.messages.push(userMsg);
+          session.messages.push({ role: "user", content: msg.message, timestamp: Date.now() });
           session.streaming = "";
           session.status = "running";
 
-          // Load system prompt fresh on each call so UI changes take effect immediately
           const { systemPrompt } = await getSettings();
 
-          // Fire-and-forget — CLI keeps running even if WebSocket closes
+          // Fire-and-forget — CLI continues even if WebSocket closes
           runClaude(msg.message, session.id, (text) => {
             session.streaming += text;
             broadcast(session, { type: "chunk", text });
-          }, systemPrompt, msg.image)
+          }, systemPrompt, msg.images)
             .then(() => {
-              session.messages.push({
-                role: "assistant",
-                content: session.streaming,
-                timestamp: Date.now(),
-              });
+              session.messages.push({ role: "assistant", content: session.streaming, timestamp: Date.now() });
               session.streaming = "";
               session.status = "idle";
               broadcast(session, { type: "done" });
             })
             .catch((err: Error) => {
               const message = err.message;
-              session.messages.push({
-                role: "assistant",
-                content: `Error: ${message}`,
-                timestamp: Date.now(),
-              });
+              session.messages.push({ role: "assistant", content: `Error: ${message}`, timestamp: Date.now() });
               session.streaming = "";
               session.status = "error";
               broadcast(session, { type: "error", message });

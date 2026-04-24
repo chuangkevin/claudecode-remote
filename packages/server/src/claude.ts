@@ -15,6 +15,8 @@ export interface ImageInput {
   mediaType: string; // e.g. "image/jpeg"
 }
 
+type Images = ImageInput | ImageInput[] | undefined;
+
 /**
  * Spawns `claude --print --output-format stream-json --verbose --include-partial-messages`.
  *
@@ -30,8 +32,11 @@ export function runClaude(
   sessionId: string,
   onChunk: (text: string) => void,
   systemPrompt?: string,
-  image?: ImageInput,
+  imagesArg?: Images,
 ): Promise<void> {
+  const images: ImageInput[] = imagesArg
+    ? Array.isArray(imagesArg) ? imagesArg : [imagesArg]
+    : [];
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
@@ -49,8 +54,8 @@ export function runClaude(
       args.push("--append-system-prompt", systemPrompt.trim());
     }
 
-    // Switch to stream-json input format when an image is attached
-    if (image) {
+    // Switch to stream-json input format when images are attached
+    if (images.length > 0) {
       args.push("--input-format", "stream-json");
     }
 
@@ -62,20 +67,18 @@ export function runClaude(
       env,
     });
 
-    if (image) {
-      // Multimodal: JSON envelope with image block + text block
+    if (images.length > 0) {
+      // Multimodal: JSON envelope — one image block per image, then the text
+      const contentBlocks = [
+        ...images.map(img => ({
+          type: "image",
+          source: { type: "base64", media_type: img.mediaType, data: img.base64 },
+        })),
+        { type: "text", text: userMessage },
+      ];
       const envelope = JSON.stringify({
         type: "user",
-        message: {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: image.mediaType, data: image.base64 },
-            },
-            { type: "text", text: userMessage },
-          ],
-        },
+        message: { role: "user", content: contentBlocks },
       });
       child.stdin.write(envelope + "\n", "utf8");
     } else {

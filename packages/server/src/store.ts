@@ -8,7 +8,6 @@ export interface StoredMessage {
 
 export type SessionStatus = "idle" | "running" | "error";
 
-// Event types broadcast to WebSocket subscribers
 export type SessionEvent =
   | { type: "chunk"; text: string }
   | { type: "done" }
@@ -17,7 +16,6 @@ export type SessionEvent =
 export interface SessionState {
   id: string;
   messages: StoredMessage[];
-  /** Chunks accumulated from the currently-running CLI call */
   streaming: string;
   status: SessionStatus;
   subscribers: Set<(ev: SessionEvent) => void>;
@@ -37,14 +35,21 @@ export function newSession(): SessionState {
   return state;
 }
 
+/** Create a session pre-populated with messages loaded from disk. */
+export function loadSession(id: string, messages: StoredMessage[]): SessionState {
+  const existing = sessions.get(id);
+  if (existing) return existing;
+  const state: SessionState = { id, messages, streaming: "", status: "idle", subscribers: new Set() };
+  sessions.set(id, state);
+  return state;
+}
+
 export function getSession(id: string): SessionState | undefined {
   return sessions.get(id);
 }
 
 export function broadcast(session: SessionState, ev: SessionEvent): void {
   for (const sub of session.subscribers) {
-    try {
-      sub(ev);
-    } catch { /* subscriber may have closed */ }
+    try { sub(ev); } catch { /* subscriber closed */ }
   }
 }

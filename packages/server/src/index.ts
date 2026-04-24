@@ -4,6 +4,7 @@ import fastifyStatic from "@fastify/static";
 import { config } from "./config.js";
 import { setupWebSocketHandler } from "./websocket.js";
 import { getSettings, saveSettings } from "./settings.js";
+import { listDiskSessions } from "./session.js";
 
 const server = Fastify({
   logger: false,
@@ -35,6 +36,11 @@ server.post<{ Body: { systemPrompt?: string } }>("/api/settings", async (req, re
   const { systemPrompt = "" } = req.body ?? {};
   await saveSettings({ systemPrompt });
   return reply.code(200).send({ ok: true });
+});
+
+// Sessions list (from ~/.claude/projects/)
+server.get("/api/sessions", async () => {
+  return listDiskSessions();
 });
 
 // 啟動 server
