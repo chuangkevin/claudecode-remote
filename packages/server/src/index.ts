@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import { setupWebSocketHandler } from "./websocket.js";
 import { getSettings, saveSettings } from "./settings.js";
 import { listDiskSessions } from "./session.js";
+import { listSessions } from "./store.js";
 
 const server = Fastify({
   logger: false,
@@ -38,9 +39,20 @@ server.post<{ Body: { systemPrompt?: string } }>("/api/settings", async (req, re
   return reply.code(200).send({ ok: true });
 });
 
-// Sessions list (from ~/.claude/projects/)
+// Sessions list: in-memory (active) sessions merged with disk sessions
 server.get("/api/sessions", async () => {
-  return listDiskSessions();
+  const diskSessions = await listDiskSessions();
+  const diskIds = new Set(diskSessions.map(s => s.id));
+
+  const memorySessions = listSessions()
+    .filter(s => !diskIds.has(s.id) && s.messages.length > 0)
+    .map(s => ({
+      id: s.id,
+      preview: (s.messages.find(m => m.role === "user")?.content ?? s.id).replace(/\s+/g, " ").trim().slice(0, 80),
+      updatedAt: s.lastRunFinishedAt || Date.now(),
+    }));
+
+  return [...memorySessions, ...diskSessions];
 });
 
 // 啟動 server

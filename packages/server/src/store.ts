@@ -18,6 +18,7 @@ export interface SessionState {
   messages: StoredMessage[];
   streaming: string;
   status: SessionStatus;
+  lastRunFinishedAt: number; // epoch ms — guard against "session already in use" races
   subscribers: Set<(ev: SessionEvent) => void>;
 }
 
@@ -29,6 +30,7 @@ export function newSession(): SessionState {
     messages: [],
     streaming: "",
     status: "idle",
+    lastRunFinishedAt: 0,
     subscribers: new Set(),
   };
   sessions.set(state.id, state);
@@ -39,13 +41,23 @@ export function newSession(): SessionState {
 export function loadSession(id: string, messages: StoredMessage[]): SessionState {
   const existing = sessions.get(id);
   if (existing) return existing;
-  const state: SessionState = { id, messages, streaming: "", status: "idle", subscribers: new Set() };
+  const state: SessionState = { id, messages, streaming: "", status: "idle", lastRunFinishedAt: 0, subscribers: new Set() };
   sessions.set(id, state);
   return state;
 }
 
+/** Returns ms to wait before the next CLI run is safe (0 = ready now). */
+export function cooldownRemaining(session: SessionState, minGapMs = 500): number {
+  const elapsed = Date.now() - session.lastRunFinishedAt;
+  return Math.max(0, minGapMs - elapsed);
+}
+
 export function getSession(id: string): SessionState | undefined {
   return sessions.get(id);
+}
+
+export function listSessions(): SessionState[] {
+  return Array.from(sessions.values());
 }
 
 export function broadcast(session: SessionState, ev: SessionEvent): void {

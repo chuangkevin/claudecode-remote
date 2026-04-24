@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { config } from "./config.js";
+import type { StoredMessage } from "./store.js";
 
 // stream-json event shapes from Claude CLI
 type AssistantEvent = {
@@ -18,18 +20,33 @@ export interface ImageInput {
 type Images = ImageInput | ImageInput[] | undefined;
 
 /**
+ * Build a contextual user message that embeds prior conversation turns.
+ * The CLI stream-json input only accepts "user" type messages, so we cannot
+ * inject assistant turns as separate lines. Instead we prepend history as a
+ * formatted text block so the model sees full context.
+ */
+function buildContextualMessage(userMessage: string, previousMessages: StoredMessage[]): string {
+  if (previousMessages.length === 0) return userMessage;
+  const history = previousMessages
+    .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+    .join("\n\n");
+  return `[Prior conversation]\n${history}\n\n[Current message]\n${userMessage}`;
+}
+
+/**
  * Spawns `claude --print --output-format stream-json --verbose --include-partial-messages`.
  *
- * Text-only messages are written to stdin as plain text (default input format).
- * When an image is provided, switches to --input-format stream-json and writes
- * a multimodal JSON envelope so Claude receives both image and text.
+ * Uses --no-session-persistence + a fresh UUID each invocation to avoid the
+ * Windows CLI session-lock bug ("Session ID already in use").
+ * Conversation history is embedded as a text prefix in the user message so
+ * the model sees full context without on-disk session files.
  *
  * Why --append-system-prompt: adds user-configured context without replacing
  *   Claude Code's built-in system prompt.
  */
 export function runClaude(
   userMessage: string,
-  sessionId: string,
+  previousMessages: StoredMessage[],
   onChunk: (text: string) => void,
   systemPrompt?: string,
   imagesArg?: Images,
@@ -46,18 +63,17 @@ export function runClaude(
       "--output-format", "stream-json",
       "--verbose",
       "--include-partial-messages",
-      "--session-id", sessionId,
+      "--session-id", randomUUID(),
+      "--no-session-persistence",
+      "--input-format", "stream-json",
       "--dangerously-skip-permissions",
     ];
 
-    if (systemPrompt?.trim()) {
-      args.push("--append-system-prompt", systemPrompt.trim());
-    }
-
-    // Switch to stream-json input format when images are attached
-    if (images.length > 0) {
-      args.push("--input-format", "stream-json");
-    }
+    const basePrompt = "請始終使用繁體中文回覆。";
+    const fullPrompt = systemPrompt?.trim()
+      ? `${basePrompt}\n${systemPrompt.trim()}`
+      : basePrompt;
+    args.push("--append-system-prompt", fullPrompt);
 
     const child = spawn("claude", args, {
       cwd: config.workspaceRoot,
@@ -67,26 +83,32 @@ export function runClaude(
       env,
     });
 
+    const contextualMessage = buildContextualMessage(userMessage, previousMessages);
+
     if (images.length > 0) {
-      // Multimodal: JSON envelope — one image block per image, then the text
       const contentBlocks = [
         ...images.map(img => ({
           type: "image",
           source: { type: "base64", media_type: img.mediaType, data: img.base64 },
         })),
-        { type: "text", text: userMessage },
+        { type: "text", text: contextualMessage },
       ];
-      const envelope = JSON.stringify({
+      child.stdin.write(JSON.stringify({
         type: "user",
         message: { role: "user", content: contentBlocks },
-      });
-      child.stdin.write(envelope + "\n", "utf8");
+      }) + "\n", "utf8");
     } else {
-      child.stdin.write(userMessage, "utf8");
+      child.stdin.write(JSON.stringify({
+        type: "user",
+        message: { role: "user", content: contextualMessage },
+      }) + "\n", "utf8");
     }
+
+    child.stdin.on("error", () => {}); // suppress EPIPE if child exits before reading
     child.stdin.end();
 
     let buf = "";
+    let stderrBuf = "";
     let emittedLength = 0;
 
     function processLine(line: string): void {
@@ -121,7 +143,9 @@ export function runClaude(
     });
 
     child.stderr.on("data", (d: Buffer) => {
-      const line = d.toString("utf8").trim();
+      const text = d.toString("utf8");
+      stderrBuf += text;
+      const line = text.trim();
       if (line) console.error("[claude]", line);
     });
 
@@ -132,8 +156,14 @@ export function runClaude(
 
     child.on("exit", (code) => {
       if (buf.trim()) processLine(buf);
-      if (code === 0) resolve();
-      else reject(new Error(`claude exited with code ${code}`));
+      if (code === 0) {
+        resolve();
+      } else {
+        const hint = stderrBuf.toLowerCase().includes("context")
+          ? " (context too long — try starting a new conversation)"
+          : stderrBuf.trim() ? ` — ${stderrBuf.trim().split("\n")[0]}` : "";
+        reject(new Error(`claude exited with code ${code}${hint}`));
+      }
     });
   });
 }

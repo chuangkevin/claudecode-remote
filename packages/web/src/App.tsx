@@ -10,7 +10,7 @@ interface Message {
 }
 
 interface ImageInput { base64: string; mediaType: string }
-interface PendingImage { file: File; preview: string; input: ImageInput }
+interface PendingImage { preview: string; thumbnail: string; input: ImageInput }
 
 interface DiskSession {
   id: string
@@ -29,6 +29,29 @@ function readAsBase64(file: File): Promise<string> {
     r.onload = () => resolve((r.result as string).split(',')[1] ?? '')
     r.onerror = reject
     r.readAsDataURL(file)
+  })
+}
+
+// Creates a small JPEG thumbnail (≤160px) as a data URL.
+// Full-res base64 data URLs from iPhone photos can be 10MB+ and fail silently
+// in iOS Safari img tags — a canvas-scaled thumbnail avoids this.
+function createThumbnail(file: File, maxPx = 160): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      const scale = Math.min(maxPx / img.width, maxPx / img.height, 1)
+      const w = Math.max(1, Math.round(img.width * scale))
+      const h = Math.max(1, Math.round(img.height * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      canvas.getContext('2d')?.drawImage(img, 0, 0, w, h)
+      resolve(canvas.toDataURL('image/jpeg', 0.8))
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('thumbnail failed')) }
+    img.src = url
   })
 }
 
@@ -128,6 +151,7 @@ export default function App() {
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([])
   const [sessions, setSessions] = useState<DiskSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const currentResponseRef = useRef('')
   const sessionIdRef = useRef<string | null>(null)
@@ -160,12 +184,13 @@ export default function App() {
 
     ws.onopen = () => {
       setIsConnected(true)
+      void fetchSessions()
       resumeSession(ws, localStorage.getItem(SESSION_KEY))
     }
     ws.onclose = () => {
       setIsConnected(false)
       wsRef.current = null
-      reconnectTimerRef.current = setTimeout(connect, 3000)
+      reconnectTimerRef.current = setTimeout(connect, 1500)
     }
     ws.onerror = () => {}
     ws.onmessage = (event) => {
@@ -222,32 +247,55 @@ export default function App() {
     }
   }, [connect])
 
+  // On mobile, iOS may keep the WS in a zombie state (readyState=1 but dead)
+  // so onclose never fires and the reconnect timer never starts.
+  // visibilitychange fires reliably when the user returns to the tab.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      const ws = wsRef.current
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        connect()
+      } else if (ws.readyState === WebSocket.OPEN) {
+        // Probe the connection — if it's a zombie the pong will never arrive
+        // and onclose will fire within a few seconds.
+        ws.send(JSON.stringify({ type: 'ping' }))
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [connect])
+
   const switchSession = (id: string) => {
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
     setCurrentResponse('')
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: id }))
+    setSidebarOpen(false)
   }
 
   const newSession = () => {
-    // Start fresh: clear stored session ID so server creates a new one
     localStorage.removeItem(SESSION_KEY)
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
     setCurrentResponse('')
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: null }))
+    setSidebarOpen(false)
   }
 
   const onImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? [])
     const newImages: PendingImage[] = await Promise.all(
-      files.map(async file => ({
-        file,
-        preview: URL.createObjectURL(file),
-        input: { base64: await readAsBase64(file), mediaType: file.type },
-      }))
+      files.map(async file => {
+        const [base64, thumbnail] = await Promise.all([readAsBase64(file), createThumbnail(file)])
+        return {
+          preview: URL.createObjectURL(file),
+          thumbnail,
+          input: { base64, mediaType: file.type },
+        }
+      })
     )
     setPendingImages(prev => [...prev, ...newImages])
     e.target.value = ''
@@ -263,7 +311,7 @@ export default function App() {
   const sendMessage = () => {
     if (!input.trim() || !wsRef.current || !isConnected || isProcessing) return
 
-    const imagePreviews = pendingImages.map(p => p.preview)
+    const imagePreviews = pendingImages.map(p => p.thumbnail)
     setMessages(prev => [...prev, { role: 'user', content: input, timestamp: Date.now(), imagePreviews }])
     setIsProcessing(true)
     currentResponseRef.current = ''
@@ -286,21 +334,38 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen bg-gray-900 text-gray-100 overflow-hidden">
-      {/* Sidebar */}
-      <Sidebar
-        sessions={sessions}
-        activeId={activeSessionId}
-        onSelect={switchSession}
-        onNew={newSession}
-        onRefresh={fetchSessions}
-      />
+    <div className="flex bg-gray-900 text-gray-100 overflow-hidden" style={{ height: '100dvh' }}>
+      {/* Mobile overlay backdrop */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-20 bg-black/60 md:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Sidebar — overlay on mobile, fixed on desktop */}
+      <div className={`
+        fixed inset-y-0 left-0 z-30 md:static md:z-auto md:flex md:flex-shrink-0
+        transition-transform duration-200
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+      `}>
+        <Sidebar
+          sessions={sessions}
+          activeId={activeSessionId}
+          onSelect={switchSession}
+          onNew={newSession}
+          onRefresh={fetchSessions}
+        />
+      </div>
 
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <div className="bg-gray-800 border-b border-gray-700 px-5 py-3 flex items-center justify-between flex-shrink-0">
-          <h1 className="text-base font-semibold text-gray-100">Claude Code Remote</h1>
+        <div className="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setSidebarOpen(s => !s)}
+              className="md:hidden p-1.5 text-gray-400 hover:text-gray-200 rounded-lg hover:bg-gray-700">
+              ☰
+            </button>
+            <h1 className="text-base font-semibold text-gray-100">Claude Code Remote</h1>
+          </div>
           <div className="flex items-center gap-3">
             <button onClick={() => setShowSettings(s => !s)} title="System Prompt"
               className={`text-lg transition-colors ${showSettings ? 'text-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>⚙</button>

@@ -8,6 +8,7 @@ import {
   getSession,
   loadSession,
   broadcast,
+  cooldownRemaining,
   type SessionState,
   type SessionEvent,
 } from "./store.js";
@@ -100,23 +101,33 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
 
           const { systemPrompt } = await getSettings();
 
-          // Fire-and-forget — CLI continues even if WebSocket closes
-          runClaude(msg.message, session.id, (text) => {
-            session.streaming += text;
-            broadcast(session, { type: "chunk", text });
+          // Respect CLI session-lock cooldown to avoid "session already in use"
+          const wait = cooldownRemaining(session);
+          if (wait > 0) await new Promise(r => setTimeout(r, wait));
+
+          // Snapshot session reference — fire-and-forget must not capture the
+          // mutable `session` variable, which could be reassigned by a later
+          // subscribeTo() call on this same WS connection.
+          const activeSession = session;
+
+          runClaude(msg.message, activeSession.messages.slice(0, -1), (text) => {
+            activeSession.streaming += text;
+            broadcast(activeSession, { type: "chunk", text });
           }, systemPrompt, msg.images)
             .then(() => {
-              session.messages.push({ role: "assistant", content: session.streaming, timestamp: Date.now() });
-              session.streaming = "";
-              session.status = "idle";
-              broadcast(session, { type: "done" });
+              activeSession.lastRunFinishedAt = Date.now();
+              activeSession.messages.push({ role: "assistant", content: activeSession.streaming, timestamp: Date.now() });
+              activeSession.streaming = "";
+              activeSession.status = "idle";
+              broadcast(activeSession, { type: "done" });
             })
             .catch((err: Error) => {
+              activeSession.lastRunFinishedAt = Date.now();
               const message = err.message;
-              session.messages.push({ role: "assistant", content: `Error: ${message}`, timestamp: Date.now() });
-              session.streaming = "";
-              session.status = "error";
-              broadcast(session, { type: "error", message });
+              activeSession.messages.push({ role: "assistant", content: `Error: ${message}`, timestamp: Date.now() });
+              activeSession.streaming = "";
+              activeSession.status = "error";
+              broadcast(activeSession, { type: "error", message });
             });
           break;
         }
