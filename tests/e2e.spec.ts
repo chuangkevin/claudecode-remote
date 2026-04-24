@@ -33,8 +33,11 @@ async function snap(page: Page, name: string) {
 
 /** Wait for Claude to finish responding (textarea becomes enabled again). */
 async function waitForAI(page: Page, timeout = TIMEOUT_AI) {
-  // The textarea is disabled while isProcessing=true
-  await expect(page.locator('textarea').first()).toBeEnabled({ timeout });
+  // Wait for processing to start (data-processing="true"), then wait for it to finish.
+  // Using data-processing attribute instead of disabled so textarea stays enabled for queue input.
+  const ta = page.locator('textarea[data-processing]').first();
+  await expect(ta).toHaveAttribute('data-processing', 'true', { timeout: 5_000 }).catch(() => {});
+  await expect(ta).toHaveAttribute('data-processing', 'false', { timeout });
   await page.waitForTimeout(400); // let React batch final state
 }
 
@@ -316,27 +319,20 @@ test.describe.serial('claudecode-remote E2E', () => {
     expect(newId).not.toBe(prevId);
     console.log(`  New session: ${newId.slice(0, 8)}...`);
 
-    // Resume old session via sidebar
-    const sidebarBtns = p.locator('.w-64 .flex-1.overflow-y-auto button');
-    const count = await sidebarBtns.count();
+    // Resume the known test session via its data-session-id attribute.
+    // Using savedSessionId avoids accidentally selecting a personal/pinned
+    // session that may have "System Prompt" in its message history.
+    const count = await p.locator('.w-64 .flex-1.overflow-y-auto button').count();
     console.log(`  Sidebar sessions: ${count}`);
 
-    if (count > 0 && msgsBeforeSwitch > 0) {
-      // Find the old session by iterating until we get one with messages
-      let resumed = false;
-      for (let i = 0; i < Math.min(count, 5); i++) {
-        await sidebarBtns.nth(i).click();
-        await expect(p.locator('textarea')).toBeEnabled({ timeout: 8_000 });
-        await p.waitForTimeout(500);
+    if (savedSessionId && msgsBeforeSwitch > 0) {
+      const sessionBtn = p.locator(`[data-session-id="${savedSessionId}"]`);
+      const found = await sessionBtn.count() > 0;
+      if (found) {
+        await sessionBtn.click();
+        await p.waitForTimeout(800);
         const msgsAfter = await p.locator('.flex.justify-start .text-sm').count();
-        if (msgsAfter > 0) {
-          console.log(`  ✓ Resumed session with ${msgsAfter} messages`);
-          resumed = true;
-          break;
-        }
-      }
-      if (resumed) {
-        const msgsAfter = await p.locator('.flex.justify-start .text-sm').count();
+        console.log(`  ✓ Resumed session ${savedSessionId.slice(0, 8)} with ${msgsAfter} messages`);
         expect(msgsAfter).toBeGreaterThan(0);
       }
     }
@@ -364,9 +360,10 @@ test.describe.serial('claudecode-remote E2E', () => {
     await expect(p.locator('text=✓ 已儲存')).toBeVisible({ timeout: 5_000 });
     await snap(p, '09b-settings-saved');
 
-    // Close settings
+    // Close settings — check the panel itself is gone (not generic "System Prompt" text
+    // which can appear in personal sessions' message history).
     await p.locator('button:has-text("✕")').click();
-    await expect(p.locator('text=System Prompt').first()).not.toBeVisible({ timeout: 3_000 });
+    await expect(p.locator('button:has-text("✕")').first()).not.toBeVisible({ timeout: 3_000 });
 
     // Start a new session to test the prompt
     await p.click('button:has-text("新對話")');

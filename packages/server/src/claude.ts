@@ -24,6 +24,7 @@ interface ManagedProcess {
   thinkingEmittedLength: number;
   messageCount: number;       // 0 = freshly spawned, inject history on first msg
   promptSent: boolean;        // true after system prompt has been injected once
+  authError: boolean;         // 401 / authentication_error detected in stderr or event
   onChunk?: (text: string) => void;
   onThinking?: (text: string) => void;
   resolve?: () => void;
@@ -164,17 +165,20 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
 
   } else if (ev.type === "error") {
     const msg = typeof ev.message === "string" ? ev.message : "Claude error";
+    if (/401|authentication_error|Please run \/login/i.test(msg)) proc.authError = true;
     const reject = proc.reject;
+    const isAuth = proc.authError;
     proc.status = "idle";
     proc.emittedLength = 0;
     proc.thinkingEmittedLength = 0;
     proc.stderrBuf = "";
+    proc.authError = false;
     proc.onChunk = undefined;
     proc.onThinking = undefined;
     proc.resolve = undefined;
     proc.reject = undefined;
     startIdleTimer(sessionId, proc);
-    reject?.(new Error(msg));
+    reject?.(new Error(isAuth ? `AUTH_401: ${msg}` : msg));
   }
   // system/init and other events are ignored
 }
@@ -217,6 +221,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
     thinkingEmittedLength: 0,
     messageCount: 0,
     promptSent: false,
+    authError: false,
   };
 
   pool.set(sessionId, proc);
@@ -231,6 +236,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
   child.stderr.on("data", (d: Buffer) => {
     const text = d.toString("utf8");
     proc.stderrBuf += text;
+    if (/401|authentication_error|Please run \/login/i.test(text)) proc.authError = true;
     const line = text.trim();
     if (line) console.error("[claude]", line);
   });
@@ -257,10 +263,16 @@ function spawnProcess(sessionId: string): ManagedProcess {
     // If we're still waiting for a result (unexpected exit), reject the promise.
     // If result was already received (resolve called), this is a no-op.
     if (proc.status === "running") {
-      const hint = proc.stderrBuf.toLowerCase().includes("context")
-        ? " (context too long — try starting a new conversation)"
-        : proc.stderrBuf.trim() ? ` — ${proc.stderrBuf.trim().split("\n")[0]}` : "";
-      proc.reject?.(new Error(`claude exited with code ${code}${hint}`));
+      let errMsg: string;
+      if (proc.authError) {
+        errMsg = "AUTH_401: Authentication expired — please re-login (run `claude /login`)";
+      } else {
+        const hint = proc.stderrBuf.toLowerCase().includes("context")
+          ? " (context too long — try starting a new conversation)"
+          : proc.stderrBuf.trim() ? ` — ${proc.stderrBuf.trim().split("\n")[0]}` : "";
+        errMsg = `claude exited with code ${code}${hint}`;
+      }
+      proc.reject?.(new Error(errMsg));
       proc.status = "idle";
       proc.resolve = undefined;
       proc.reject = undefined;
@@ -353,6 +365,32 @@ export function runClaude(
       "utf8",
     );
   });
+}
+
+/**
+ * Cancel an in-progress Claude run for a session.
+ * Kills the process and rejects the in-flight promise with "Cancelled".
+ * Returns true if something was cancelled, false if nothing was running.
+ */
+export function cancelSession(sessionId: string): boolean {
+  const proc = pool.get(sessionId);
+  if (!proc || proc.status !== "running") return false;
+
+  // Capture reject before clearing, so exit handler doesn't double-fire
+  const reject = proc.reject;
+  proc.resolve = undefined;
+  proc.reject = undefined;
+  proc.onChunk = undefined;
+  proc.onThinking = undefined;
+  proc.status = "idle";
+
+  clearIdleTimer(proc);
+  pool.delete(sessionId);
+  try { proc.child.kill(); } catch { /* already dead */ }
+
+  reject?.(new Error("Cancelled"));
+  console.log(`[claude] cancelled session ${sessionId}`);
+  return true;
 }
 
 /** Forcibly kill the process for a session (e.g. when session is deleted). */

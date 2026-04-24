@@ -13,6 +13,8 @@ export type SessionEvent =
   | { type: "chunk"; text: string }
   | { type: "thinking"; text: string }
   | { type: "done" }
+  | { type: "cancelled" }
+  | { type: "reconnecting" }
   | { type: "error"; message: string };
 
 export interface SessionState {

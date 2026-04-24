@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
-import { runClaude } from "./claude.js";
+import { runClaude, cancelSession } from "./claude.js";
 import { getImage } from "./image-store.js";
 import { getSettings } from "./settings.js";
 import { dbUpsertSession, dbInsertMessage, dbLoadMessages } from "./db.js";
@@ -17,6 +17,7 @@ import {
 type ClientMsg =
   | { type: "ping" }
   | { type: "resume"; sessionId?: string | null }
+  | { type: "cancel" }
   | { type: "chat"; message: string; sessionId?: string | null; imageIds?: string[] };
 
 function send(ws: WebSocket, obj: unknown): void {
@@ -38,6 +39,10 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           send(connection, { type: "thinking", text: ev.text });
         } else if (ev.type === "done") {
           send(connection, { type: "done" });
+        } else if (ev.type === "cancelled") {
+          send(connection, { type: "cancelled" });
+        } else if (ev.type === "reconnecting") {
+          send(connection, { type: "reconnecting" });
         } else {
           send(connection, { type: "error", message: (ev as { message: string }).message });
         }
@@ -78,6 +83,12 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
         case "ping":
           send(connection, { type: "pong" });
           break;
+
+        case "cancel": {
+          cancelSession(session.id);
+          // cancelSession triggers reject("Cancelled") → .catch() → broadcast "cancelled"
+          break;
+        }
 
         case "resume": {
           const gen = ++resumeGen;
@@ -167,12 +178,25 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
 
           const imageInputs = resolvedImages.map(img => ({ base64: img.base64, mediaType: img.mediaType }));
 
-          runClaude(activeSession.id, msg.message, activeSession.messages.slice(0, -1), (text) => {
-            activeSession.streaming += text;
-            broadcast(activeSession, { type: "chunk", text });
-          }, systemPrompt, imageInputs.length > 0 ? imageInputs : undefined, (text) => {
-            broadcast(activeSession, { type: "thinking", text });
-          })
+          const doRun = () => runClaude(
+            activeSession.id, msg.message, activeSession.messages.slice(0, -1),
+            (text) => { activeSession.streaming += text; broadcast(activeSession, { type: "chunk", text }); },
+            systemPrompt,
+            imageInputs.length > 0 ? imageInputs : undefined,
+            (text) => { broadcast(activeSession, { type: "thinking", text }); },
+          );
+
+          doRun()
+            // 401 auto-retry: notify client, reset streaming, retry once
+            .catch(async (err: Error) => {
+              if (err.message.startsWith("AUTH_401")) {
+                broadcast(activeSession, { type: "reconnecting" });
+                activeSession.streaming = "";
+                await new Promise(r => setTimeout(r, 1500));
+                return doRun();
+              }
+              throw err;
+            })
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
               const content = activeSession.streaming;
@@ -189,9 +213,17 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             })
             .catch((err: Error) => {
               activeSession.lastRunFinishedAt = Date.now();
+              activeSession.streaming = "";
+
+              if (err.message === "Cancelled") {
+                // Clean cancel: no error message, status back to idle
+                activeSession.status = "idle";
+                broadcast(activeSession, { type: "cancelled" });
+                return;
+              }
+
               const message = err.message;
               activeSession.messages.push({ role: "assistant", content: `Error: ${message}`, timestamp: Date.now() });
-              activeSession.streaming = "";
               activeSession.status = "error";
               broadcast(activeSession, { type: "error", message });
               try {

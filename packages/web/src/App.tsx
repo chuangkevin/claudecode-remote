@@ -255,6 +255,7 @@ function Sidebar({ sessions, activeId, onSelect, onNew, onRefresh, onRename, onP
                 {/* Main click area */}
                 <button
                   onClick={() => onSelect(s.id)}
+                  data-session-id={s.id}
                   className={`flex-1 min-w-0 text-left px-3 py-2.5 ${
                     s.id === activeId ? 'text-gray-100' : 'text-gray-400 hover:text-gray-200'
                   }`}>
@@ -314,6 +315,8 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [longWait, setLongWait] = useState(false)
   const [currentThinking, setCurrentThinking] = useState('')
+  const [isReconnecting, setIsReconnecting] = useState(false)
+  const [messageQueue, setMessageQueue] = useState<string[]>([])
 
   const currentResponseRef = useRef('')
   const currentThinkingRef = useRef('')
@@ -323,6 +326,7 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const lastChunkAtRef = useRef<number>(0)
+  const messageQueueRef = useRef<string[]>([])
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
@@ -377,6 +381,7 @@ export default function App() {
 
     ws.onopen = () => {
       setIsConnected(true)
+      setIsProcessing(false) // Reset processing state on reconnect
       void fetchSessions()
       resumeSession(ws, localStorage.getItem(SESSION_KEY))
     }
@@ -439,8 +444,49 @@ export default function App() {
           currentThinkingRef.current = ''
           setCurrentResponse('')
           setCurrentThinking('')
+          setIsReconnecting(false)
           setIsProcessing(false)
           void fetchSessions()
+          // Auto-send next queued message
+          const queue = messageQueueRef.current
+          if (queue.length > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            const [next, ...rest] = queue
+            messageQueueRef.current = rest
+            setMessageQueue(rest)
+            setTimeout(() => {
+              if (!wsRef.current || !sessionIdRef.current) return
+              setMessages(prev => [...prev, { role: 'user', content: next, timestamp: Date.now() }])
+              setIsProcessing(true)
+              setLongWait(false)
+              lastChunkAtRef.current = Date.now()
+              currentResponseRef.current = ''
+              setCurrentResponse('')
+              currentThinkingRef.current = ''
+              setCurrentThinking('')
+              wsRef.current.send(JSON.stringify({ type: 'chat', message: next, sessionId: sessionIdRef.current }))
+            }, 100)
+          }
+          break
+        }
+        case 'cancelled': {
+          currentResponseRef.current = ''
+          currentThinkingRef.current = ''
+          setCurrentResponse('')
+          setCurrentThinking('')
+          setIsReconnecting(false)
+          setIsProcessing(false)
+          setMessages(prev => [...prev, { role: 'assistant', content: '⬛ 已中斷', timestamp: Date.now() }])
+          messageQueueRef.current = []
+          setMessageQueue([])
+          break
+        }
+        case 'reconnecting': {
+          // Auth retry in progress — keep isProcessing=true, show reconnecting label
+          currentResponseRef.current = ''
+          currentThinkingRef.current = ''
+          setCurrentResponse('')
+          setCurrentThinking('')
+          setIsReconnecting(true)
           break
         }
         case 'error': {
@@ -450,6 +496,7 @@ export default function App() {
           currentThinkingRef.current = ''
           setCurrentResponse('')
           setCurrentThinking('')
+          setIsReconnecting(false)
           setIsProcessing(false)
           break
         }
@@ -559,9 +606,23 @@ export default function App() {
     })
   }
 
+  const cancelMessage = () => {
+    wsRef.current?.send(JSON.stringify({ type: 'cancel' }))
+  }
+
   const sendMessage = () => {
-    if (!input.trim() || !wsRef.current || !isConnected || isProcessing) return
-    if (pendingImages.some(p => p.uploading)) return // wait for all uploads
+    if (!input.trim() || !wsRef.current || !isConnected) return
+    if (pendingImages.some(p => p.uploading)) return
+
+    // Queue when Claude is busy
+    if (isProcessing) {
+      const queued = input.trim()
+      const next = [...messageQueueRef.current, queued]
+      messageQueueRef.current = next
+      setMessageQueue(next)
+      setInput('')
+      return
+    }
 
     const readyImages = pendingImages.filter(p => p.id && !p.error)
     const imagePreviews = readyImages.map(p => p.thumbnail)
@@ -571,6 +632,7 @@ export default function App() {
     lastChunkAtRef.current = Date.now()
     currentResponseRef.current = ''
     setCurrentResponse('')
+    currentThinkingRef.current = ''
 
     wsRef.current.send(JSON.stringify({
       type: 'chat',
@@ -690,7 +752,7 @@ export default function App() {
                       <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.3s]" />
                     </div>
                     <span className="text-xs text-gray-500">
-                      {longWait ? '處理中，請稍候…' : '正在思考…'}
+                      {isReconnecting ? '重新連線中...' : longWait ? '處理中，請稍候…' : '正在思考…'}
                     </span>
                   </div>
                 </div>
@@ -740,6 +802,32 @@ export default function App() {
           </div>
         )}
 
+        {/* Message queue strip */}
+        {messageQueue.length > 0 && (
+          <div className="bg-gray-800/80 border-t border-gray-700 px-4 py-2 flex-shrink-0">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-yellow-500/80">排隊中 ({messageQueue.length} 則)</span>
+              <button onClick={() => { messageQueueRef.current = []; setMessageQueue([]) }}
+                className="text-xs text-gray-600 hover:text-red-400 transition-colors">
+                清除全部
+              </button>
+            </div>
+            <div className="space-y-0.5">
+              {messageQueue.map((qMsg, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="text-xs text-gray-600 w-4 flex-shrink-0">{i + 1}.</span>
+                  <span className="flex-1 text-xs text-gray-400 truncate">{qMsg}</span>
+                  <button onClick={() => {
+                    const next = messageQueueRef.current.filter((_, j) => j !== i)
+                    messageQueueRef.current = next
+                    setMessageQueue(next)
+                  }} className="text-xs text-gray-600 hover:text-red-400 px-1 transition-colors">×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Input */}
         <div className="bg-gray-800 border-t border-gray-700 px-4 py-3 flex-shrink-0">
           <div className="flex items-end gap-2">
@@ -754,14 +842,21 @@ export default function App() {
             <input ref={fileInputRef} type="file" accept={ACCEPTED} multiple className="hidden" onChange={onImagePick} />
 
             <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
-              placeholder="輸入訊息… (Enter 傳送，Shift+Enter 換行)"
+              placeholder={isProcessing ? '輸入訊息… (Enter 排隊，Shift+Enter 換行)' : '輸入訊息… (Enter 傳送，Shift+Enter 換行)'}
               className="flex-1 resize-none rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
-              rows={2} disabled={!isConnected || isProcessing} />
+              rows={2} disabled={!isConnected} data-processing={isProcessing} />
 
-            <button onClick={sendMessage} disabled={!isConnected || isProcessing || !input.trim() || pendingImages.some(p => p.uploading)}
-              className="flex-shrink-0 px-4 py-2.5 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors">
-              傳送
-            </button>
+            {isProcessing && !input.trim() ? (
+              <button onClick={cancelMessage}
+                className="flex-shrink-0 px-4 py-2.5 bg-red-800 text-white text-sm rounded-xl hover:bg-red-700 transition-colors">
+                ⬛ 中斷
+              </button>
+            ) : (
+              <button onClick={sendMessage} disabled={!isConnected || !input.trim() || pendingImages.some(p => p.uploading)}
+                className="flex-shrink-0 px-4 py-2.5 bg-blue-600 text-white text-sm rounded-xl hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed transition-colors">
+                {isProcessing ? '排隊' : '傳送'}
+              </button>
+            )}
           </div>
         </div>
       </div>
