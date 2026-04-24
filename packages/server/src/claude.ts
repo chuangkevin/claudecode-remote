@@ -19,9 +19,11 @@ interface ManagedProcess {
   buf: string;                // incomplete stdout line buffer
   stderrBuf: string;
   emittedLength: number;      // dedup partial chunks
+  thinkingEmittedLength: number;
   messageCount: number;       // 0 = freshly spawned, inject history on first msg
   promptSent: boolean;        // true after system prompt has been injected once
   onChunk?: (text: string) => void;
+  onThinking?: (text: string) => void;
   resolve?: () => void;
   reject?: (err: Error) => void;
 }
@@ -128,10 +130,17 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
   try { ev = JSON.parse(trimmed) as typeof ev; } catch { return; }
 
   if (ev.type === "assistant") {
-    const content = (ev.message as { content?: Array<{ type: string; text?: string }> })?.content ?? [];
+    type Block = { type: string; text?: string; thinking?: string };
+    const content = (ev.message as { content?: Block[] })?.content ?? [];
     let fullText = "";
+    let fullThinking = "";
     for (const block of content) {
       if (block.type === "text" && typeof block.text === "string") fullText += block.text;
+      if (block.type === "thinking" && typeof block.thinking === "string") fullThinking += block.thinking;
+    }
+    if (fullThinking.length > proc.thinkingEmittedLength) {
+      proc.onThinking?.(fullThinking.slice(proc.thinkingEmittedLength));
+      proc.thinkingEmittedLength = fullThinking.length;
     }
     if (fullText.length > proc.emittedLength) {
       proc.onChunk?.(fullText.slice(proc.emittedLength));
@@ -139,13 +148,13 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
     }
 
   } else if (ev.type === "result") {
-    // Response complete — process may keep running (persistent) or exit (one-shot).
-    // Either way, resolve the promise now and wait for next stdin message or idle.
     const resolve = proc.resolve;
     proc.status = "idle";
     proc.emittedLength = 0;
+    proc.thinkingEmittedLength = 0;
     proc.stderrBuf = "";
     proc.onChunk = undefined;
+    proc.onThinking = undefined;
     proc.resolve = undefined;
     proc.reject = undefined;
     startIdleTimer(sessionId, proc);
@@ -156,8 +165,10 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
     const reject = proc.reject;
     proc.status = "idle";
     proc.emittedLength = 0;
+    proc.thinkingEmittedLength = 0;
     proc.stderrBuf = "";
     proc.onChunk = undefined;
+    proc.onThinking = undefined;
     proc.resolve = undefined;
     proc.reject = undefined;
     startIdleTimer(sessionId, proc);
@@ -201,6 +212,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
     buf: "",
     stderrBuf: "",
     emittedLength: 0,
+    thinkingEmittedLength: 0,
     messageCount: 0,
     promptSent: false,
   };
@@ -280,6 +292,7 @@ export function runClaude(
   onChunk: (text: string) => void,
   systemPrompt?: string,
   images?: ImageInput[],
+  onThinking?: (text: string) => void,
 ): Promise<void> {
   let proc = pool.get(sessionId);
 
@@ -299,9 +312,11 @@ export function runClaude(
     const p = proc!;
     p.status = "running";
     p.onChunk = onChunk;
+    p.onThinking = onThinking;
     p.resolve = resolve;
     p.reject = reject;
     p.emittedLength = 0;
+    p.thinkingEmittedLength = 0;
 
     const isFirst = p.messageCount === 0;
     p.messageCount++;

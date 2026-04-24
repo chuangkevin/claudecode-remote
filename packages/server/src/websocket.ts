@@ -34,6 +34,8 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
       const handler = (ev: SessionEvent) => {
         if (ev.type === "chunk") {
           send(connection, { type: "chunk", text: ev.text });
+        } else if (ev.type === "thinking") {
+          send(connection, { type: "thinking", text: ev.text });
         } else if (ev.type === "done") {
           send(connection, { type: "done" });
         } else {
@@ -140,7 +142,9 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           runClaude(activeSession.id, msg.message, activeSession.messages.slice(0, -1), (text) => {
             activeSession.streaming += text;
             broadcast(activeSession, { type: "chunk", text });
-          }, systemPrompt, imageInputs.length > 0 ? imageInputs : undefined)
+          }, systemPrompt, imageInputs.length > 0 ? imageInputs : undefined, (text) => {
+            broadcast(activeSession, { type: "thinking", text });
+          })
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
               activeSession.messages.push({ role: "assistant", content: activeSession.streaming, timestamp: Date.now() });

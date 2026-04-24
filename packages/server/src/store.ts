@@ -11,6 +11,7 @@ export type SessionStatus = "idle" | "running" | "error";
 
 export type SessionEvent =
   | { type: "chunk"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "done" }
   | { type: "error"; message: string };
 

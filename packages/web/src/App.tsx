@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -7,6 +9,7 @@ interface Message {
   content: string
   timestamp: number
   imagePreviews?: string[]
+  thinking?: string
 }
 
 interface PendingImage {
@@ -72,6 +75,56 @@ function relativeTime(ms: number): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分鐘前`
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小時前`
   return `${Math.floor(diff / 86_400_000)} 天前`
+}
+
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ children }) => <h1 className="text-lg font-bold mt-3 mb-1 text-gray-100">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-base font-semibold mt-3 mb-1 text-gray-100">{children}</h2>,
+        h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1 text-gray-200">{children}</h3>,
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        ul: ({ children }) => <ul className="list-disc list-outside pl-4 mb-2 space-y-0.5">{children}</ul>,
+        ol: ({ children }) => <ol className="list-decimal list-outside pl-4 mb-2 space-y-0.5">{children}</ol>,
+        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        pre: ({ children }) => <pre className="bg-gray-900 rounded-lg p-3 my-2 overflow-x-auto text-xs font-mono text-green-300">{children}</pre>,
+        code: ({ className, children }) =>
+          className
+            ? <code className={className}>{children}</code>
+            : <code className="bg-gray-900/70 rounded px-1 py-0.5 text-xs font-mono text-green-300">{children}</code>,
+        blockquote: ({ children }) => <blockquote className="border-l-2 border-gray-600 pl-3 my-2 text-gray-400 italic">{children}</blockquote>,
+        a: ({ href, children }) => <a href={href} className="text-blue-400 hover:underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+        strong: ({ children }) => <strong className="font-semibold text-gray-100">{children}</strong>,
+        em: ({ children }) => <em className="italic text-gray-300">{children}</em>,
+        hr: () => <hr className="border-gray-700 my-3" />,
+        table: ({ children }) => <div className="overflow-x-auto my-2"><table className="text-xs border-collapse w-full">{children}</table></div>,
+        th: ({ children }) => <th className="border border-gray-600 px-2 py-1 bg-gray-700 text-left font-medium">{children}</th>,
+        td: ({ children }) => <td className="border border-gray-600 px-2 py-1">{children}</td>,
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  )
+}
+
+function ThinkingBlock({ thinking, live }: { thinking: string; live?: boolean }) {
+  return (
+    <details className="mb-2 rounded-lg border border-gray-700 overflow-hidden text-xs">
+      <summary className="px-3 py-1.5 cursor-pointer select-none hover:bg-gray-700/40 flex items-center gap-1.5 text-gray-500 list-none">
+        <svg className="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.347a3.5 3.5 0 00-1.033 2.476v.228a2 2 0 01-4 0v-.228a3.5 3.5 0 00-1.033-2.476l-.347-.347z" />
+        </svg>
+        <span>{live ? '思考中…' : '思考過程'}</span>
+      </summary>
+      <div className="px-3 py-2 text-gray-500 whitespace-pre-wrap font-mono text-xs border-t border-gray-700 bg-gray-950/60 max-h-48 overflow-y-auto">
+        {thinking}
+      </div>
+    </details>
+  )
 }
 
 // ── Settings panel ────────────────────────────────────────────────────────────
@@ -260,8 +313,10 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [longWait, setLongWait] = useState(false)
+  const [currentThinking, setCurrentThinking] = useState('')
 
   const currentResponseRef = useRef('')
+  const currentThinkingRef = useRef('')
   const sessionIdRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -356,6 +411,13 @@ export default function App() {
           setIsProcessing(data.status === 'running')
           break
         }
+        case 'thinking': {
+          const text = (data.text ?? '') as string
+          if (!text) break
+          currentThinkingRef.current += text
+          setCurrentThinking(currentThinkingRef.current)
+          break
+        }
         case 'chunk': {
           const text = (data.text ?? '') as string
           if (!text) break
@@ -368,18 +430,23 @@ export default function App() {
         }
         case 'done': {
           const content = currentResponseRef.current
-          if (content) setMessages(prev => [...prev, { role: 'assistant', content, timestamp: Date.now() }])
+          const thinking = currentThinkingRef.current || undefined
+          if (content) setMessages(prev => [...prev, { role: 'assistant', content, timestamp: Date.now(), thinking }])
           currentResponseRef.current = ''
+          currentThinkingRef.current = ''
           setCurrentResponse('')
+          setCurrentThinking('')
           setIsProcessing(false)
-          void fetchSessions() // refresh sidebar after response
+          void fetchSessions()
           break
         }
         case 'error': {
           const msg = (data.message ?? String(data.error ?? 'Unknown error')) as string
           setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${msg}`, timestamp: Date.now() }])
           currentResponseRef.current = ''
+          currentThinkingRef.current = ''
           setCurrentResponse('')
+          setCurrentThinking('')
           setIsProcessing(false)
           break
         }
@@ -417,8 +484,10 @@ export default function App() {
   const switchSession = (id: string) => {
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
+    currentThinkingRef.current = ''
     setCurrentResponse('')
-    setMessages([]) // clear immediately so empty state shows while server loads
+    setCurrentThinking('')
+    setMessages([])
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: id }))
     setSidebarOpen(false)
@@ -428,8 +497,10 @@ export default function App() {
     localStorage.removeItem(SESSION_KEY)
     if (!wsRef.current || !isConnected) return
     currentResponseRef.current = ''
+    currentThinkingRef.current = ''
     setCurrentResponse('')
-    setMessages([]) // clear immediately so empty state shows while server loads
+    setCurrentThinking('')
+    setMessages([])
     setIsProcessing(false)
     wsRef.current.send(JSON.stringify({ type: 'resume', sessionId: null }))
     setSidebarOpen(false)
@@ -580,7 +651,14 @@ export default function App() {
                       ))}
                     </div>
                   )}
-                  <div className="whitespace-pre-wrap break-words text-sm">{msg.content}</div>
+                  {msg.role === 'assistant' ? (
+                    <div className="text-sm">
+                      {msg.thinking && <ThinkingBlock thinking={msg.thinking} />}
+                      <MarkdownContent content={msg.content} />
+                    </div>
+                  ) : (
+                    <div className="whitespace-pre-wrap break-words text-sm">{msg.content}</div>
+                  )}
                   <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
                     {new Date(msg.timestamp).toLocaleTimeString('zh-TW')}
                   </div>
@@ -588,10 +666,13 @@ export default function App() {
               </div>
             ))}
 
-            {currentResponse && (
+            {(currentThinking || currentResponse) && (
               <div className="flex justify-start">
                 <div className="max-w-[80%] rounded-xl px-4 py-2.5 bg-gray-800 border border-gray-700 text-gray-100">
-                  <div className="whitespace-pre-wrap break-words text-sm">{currentResponse}</div>
+                  <div className="text-sm">
+                    {currentThinking && <ThinkingBlock thinking={currentThinking} live />}
+                    {currentResponse && <MarkdownContent content={currentResponse} />}
+                  </div>
                 </div>
               </div>
             )}
