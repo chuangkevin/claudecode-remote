@@ -1,0 +1,22 @@
+{
+  "name": "claudecode-remote",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @claudecode-remote/server",
+    "dev:web": "npm run dev --workspace @claudecode-remote/web",
+    "build": "npm run build --workspaces",
+    "start": "npm run start --workspace @claudecode-remote/server"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "playwright": "^1.59.1"
+  }
+}

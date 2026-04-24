@@ -1,20 +1,28 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
-
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+context: |
+  # claudecode-remote — Web-based Claude Code
+  
+  目標：創建一個 web 介面，讓使用者可以在多裝置上存取並繼續 Claude Code 對話，並能進行完整的程式開發工作。
+  
+  ## 技術堆疊
+  - Backend: Node.js + TypeScript
+  - Frontend: React + TypeScript
+  - Claude API: Anthropic SDK
+  - Session Storage: 相容 Claude Code 的 .jsonl 格式
+  
+  ## 核心需求
+  1. 完整的對話功能（使用 Claude API）
+  2. 工具呼叫支援：Bash, Read, Write, Edit, Grep, Glob
+  3. Session 管理（相容 ~/.claude/projects/ 格式）
+  4. 多裝置存取（透過 web 介面）
+  5. 檔案系統存取（在 server 端執行）
+  
+  ## 架構限制
+  - 必須相容 Claude Code 的 session 格式
+  - 工具執行在 server 端（不是 browser）
+  - 需要處理權限和安全性
+  
+  ## 參考專案
+  - opencode-remote: 透明 proxy 架構
+  - Claude Code CLI: Session 格式和工具實作
