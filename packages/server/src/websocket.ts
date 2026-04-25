@@ -45,6 +45,8 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
           send(connection, { type: "cancelled" });
         } else if (ev.type === "reconnecting") {
           send(connection, { type: "reconnecting" });
+        } else if (ev.type === "inject") {
+          send(connection, { type: "inject", message: ev.message });
         } else {
           send(connection, { type: "error", message: (ev as { message: string }).message });
         }

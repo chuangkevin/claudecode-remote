@@ -114,12 +114,12 @@ server.patch<{ Params: { id: string }; Body: { pinned: boolean } }>(
 
 // ── Tasks API ─────────────────────────────────────────────────────────────────
 
-server.post<{ Body: { repoPath?: string; prompt?: string } }>(
+server.post<{ Body: { repoPath?: string; prompt?: string; parentSessionId?: string } }>(
   "/api/tasks",
   async (req, reply) => {
-    const { repoPath = "", prompt = "" } = req.body ?? {};
+    const { repoPath = "", prompt = "", parentSessionId } = req.body ?? {};
     if (!prompt.trim()) return reply.code(400).send({ error: "prompt required" });
-    const result = createTask({ repoPath: repoPath.trim(), prompt: prompt.trim() });
+    const result = createTask({ repoPath: repoPath.trim(), prompt: prompt.trim(), parentSessionId });
     if ("error" in result) return reply.code(429).send({ error: result.error });
     return { ok: true, task: result };
   },
