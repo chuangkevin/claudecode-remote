@@ -5,15 +5,17 @@ import { join } from "node:path";
 import { config } from "./config.js";
 import { setupWebSocketHandler } from "./websocket.js";
 import { getSettings, saveSettings } from "./settings.js";
-import { initDb, migrateFromJson, dbLoadAllSessions, dbLoadMessages, dbUpsertSession } from "./db.js";
+import { initDb, migrateFromJson, dbLoadAllSessions, dbLoadMessages, dbUpsertSession, dbLoadTaskMessages } from "./db.js";
 import { loadSession } from "./store.js";
 import type { StoredMessage } from "./store.js";
 import { storeImage } from "./image-store.js";
+import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb } from "./task-manager.js";
 
 // ── DB init + startup load ────────────────────────────────────────────────────
 
 initDb();
 migrateFromJson(join(config.claudeDataDir, "claudecode-remote.json"));
+loadTasksFromDb();
 
 // Pre-load all persisted sessions into the in-memory store so they are
 // immediately available when clients resume or send chat messages.
@@ -32,7 +34,7 @@ for (const s of dbLoadAllSessions()) {
 const server = Fastify({ logger: false });
 
 await server.register(fastifyWebsocket);
-server.register(setupWebSocketHandler);
+await server.register(setupWebSocketHandler);
 
 await server.register(fastifyStatic, {
   root: config.webRoot,
@@ -89,6 +91,46 @@ server.patch<{ Params: { id: string }; Body: { pinned: boolean } }>(
     const { id } = req.params;
     dbUpsertSession(id, { pinned: Boolean(req.body?.pinned) });
     return { ok: true };
+  },
+);
+
+// ── Tasks API ─────────────────────────────────────────────────────────────────
+
+server.post<{ Body: { repoPath?: string; prompt?: string } }>(
+  "/api/tasks",
+  async (req, reply) => {
+    const { repoPath = "", prompt = "" } = req.body ?? {};
+    if (!prompt.trim()) return reply.code(400).send({ error: "prompt required" });
+    const result = createTask({ repoPath: repoPath.trim(), prompt: prompt.trim() });
+    if ("error" in result) return reply.code(429).send({ error: result.error });
+    return { ok: true, task: result };
+  },
+);
+
+server.get("/api/tasks", async () => listTasks());
+
+server.delete<{ Params: { id: string } }>(
+  "/api/tasks/:id",
+  async (req, reply) => {
+    const { id } = req.params;
+    if (cancelTask(id) || deleteTask(id)) return { ok: true };
+    return reply.code(404).send({ error: "not found" });
+  },
+);
+
+server.get<{ Params: { id: string } }>(
+  "/api/tasks/:id/transcript",
+  async (req, reply) => {
+    const { id } = req.params;
+    const task = getTask(id);
+    if (task) return { messages: task.messages, streaming: task.streaming, status: task.status };
+    const rows = dbLoadTaskMessages(id);
+    if (rows.length === 0) return reply.code(404).send({ error: "not found" });
+    return {
+      messages: rows.map(m => ({ role: m.role, content: m.content, timestamp: m.created_at })),
+      streaming: "",
+      status: "done",
+    };
   },
 );
 

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
-import { runClaude, cancelSession } from "./claude.js";
+import { runClaude, cancelSession, getProcessStatus } from "./claude.js";
 import { getImage } from "./image-store.js";
 import { getSettings } from "./settings.js";
 import { dbUpsertSession, dbInsertMessage, dbLoadMessages } from "./db.js";
@@ -13,6 +13,7 @@ import {
   type SessionState,
   type SessionEvent,
 } from "./store.js";
+import { taskEvents, TASK_EVENT_NAMES } from "./task-manager.js";
 
 type ClientMsg =
   | { type: "ping" }
@@ -52,11 +53,21 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
     }
 
     function sendSessionSnapshot(): void {
-      // Fix: if streaming is empty and last run finished, status should be idle.
-      // This prevents stuck "processing" state when client reconnects after AI finished.
+      // Sync session status with CLI process status to prevent stuck "processing" state
+      // after reconnect (e.g., if process crashed or was cleaned up during disconnect).
+      const processStatus = getProcessStatus(session.id);
+
+      // If CLI process is idle but session thinks it's running, fix the session state.
+      if (processStatus === "idle" && session.status === "running") {
+        session.status = "idle";
+        session.streaming = "";
+      }
+
+      // Additional guard: if streaming is empty and last run finished, status should be idle.
       const actualStatus = session.streaming === "" && session.lastRunFinishedAt > 0
         ? "idle"
         : session.status;
+
       send(connection, {
         type: "session",
         sessionId: session.id,
@@ -199,10 +210,10 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             })
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
+              activeSession.status = "idle";  // Set idle FIRST so reconnect sees correct state
               const content = activeSession.streaming;
               activeSession.messages.push({ role: "assistant", content, timestamp: Date.now() });
               activeSession.streaming = "";
-              activeSession.status = "idle";
               broadcast(activeSession, { type: "done" });
               try {
                 dbInsertMessage(activeSession.id, "assistant", content);
@@ -237,8 +248,13 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
       }
     });
 
+    // Forward all task events to this WS client
+    const forwardTask = (data: unknown) => send(connection, data);
+    for (const ev of TASK_EVENT_NAMES) taskEvents.on(ev, forwardTask);
+
     connection.on("close", () => {
       if (unsubscribe) unsubscribe();
+      for (const ev of TASK_EVENT_NAMES) taskEvents.off(ev, forwardTask);
       console.log(`[ws] client disconnected (session ${session.id}) — CLI continues in background`);
     });
   });
