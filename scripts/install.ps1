@@ -68,24 +68,23 @@ try {
     Warn "Could not set Registry entry: $_"
 }
 
-# ── 6. Task Scheduler watchdog (every 1 minute) ───────────────────────────────
-Step "Creating Task Scheduler watchdog (every minute)"
-$watchCmd = "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ProjectRoot\watchdog.ps1`""
+# ── 6. Task Scheduler watchdog (every 1 minute, fully hidden) ────────────────
+Step "Creating Task Scheduler watchdog (every minute, hidden)"
 
 # Remove existing task (ignore errors if not present)
 & schtasks.exe /delete /tn "ClaudeCodeRemote-Watchdog" /f 2>$null
-Start-Sleep -Milliseconds 500
 
-$createResult = & schtasks.exe /create `
-    /tn "ClaudeCodeRemote-Watchdog" `
-    /tr $watchCmd `
-    /sc minute /mo 1 `
-    /ru $env:USERNAME /f 2>&1
-
-if ($LASTEXITCODE -eq 0) {
-    Ok "Watchdog task created (runs every minute, auto-restarts on crash)"
-} else {
-    Warn "Watchdog task creation failed (may need admin): $createResult"
+try {
+    $action   = New-ScheduledTaskAction -Execute "powershell.exe" `
+                    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ProjectRoot\watchdog.ps1`""
+    $trigger  = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 1) `
+                    -Once -At (Get-Date)
+    $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName "ClaudeCodeRemote-Watchdog" `
+        -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
+    Ok "Watchdog task created (runs every minute, fully hidden)"
+} catch {
+    Warn "Watchdog task creation failed: $_"
     Warn "Run this script as Administrator to enable the watchdog"
 }
 
