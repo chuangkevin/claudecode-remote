@@ -55,6 +55,10 @@ npm run build        # build server (tsc) + web (vite)
 **Mac**: `bash scripts/start.sh` / `bash scripts/stop.sh`
 **Full install**: `scripts/install.ps1` (Win) or `bash scripts/install.sh` (Mac)
 
+**Windows watchdog**: Task Scheduler runs `wscript.exe watchdog.vbs` every minute.
+`watchdog.vbs` is a silent VBScript wrapper — it invokes `watchdog.ps1` with `-WindowStyle Hidden`
+via `WshShell.Run(..., 0, False)` so no PowerShell window ever flashes.
+
 ## Environment Variables
 
 | Variable | Default | Description |

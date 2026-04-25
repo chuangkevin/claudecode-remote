@@ -48,73 +48,70 @@
 
 ---
 
-## Phase 3：Dispatch-like 多任務（🔲 規劃中）
+## Phase 3：Dispatch-like 多任務（✅ P0 完成 2026-04-25）
 
 ### 核心概念
 
-從主對話 spawn 子任務，每個子任務是一個獨立的 Claude Code CLI session，平行執行、互不干擾，完成後回報到主介面。
+Task dispatch 由 AI 自動決定 — 主 Claude CLI agent 在對話中透過 HTTP tool use 呼叫
+`POST /api/tasks` 來 spawn 子任務。不提供手動派工 UI，以保持介面簡潔。
 
-類比：Claude Code 的 `Task` 工具，但在 Web 介面中可見化每個子任務的進度。
+每個子任務運行在獨立的 git worktree，有自己的 CLI process，平行執行、互不干擾。
 
-### 功能規格
+### 實際完成功能（P0）
 
-#### 子任務建立
-- 使用者在主對話中輸入如：`/task 幫我重構 packages/server/src/claude.ts`
-- 或 Claude 自己決定 spawn 子任務（tool call 方式）
-- Server 建立新的 CLI process（新的 session ID）
-- 子任務在 sidebar 顯示為縮進的子項目，帶有「執行中」spinner
+#### 子任務建立與管理
+- [x] `POST /api/tasks` — 建立任務 `{ repoPath?, prompt }`；超過 20 個回 429
+- [x] `GET /api/tasks` — 列出所有任務及狀態
+- [x] `DELETE /api/tasks/:id` — 取消執行中任務 + 刪除完成任務
+- [x] `GET /api/tasks/:id/transcript` — 取得完整對話記錄
+- [x] 並行上限：`MAX_CONCURRENT = 20`
+- [x] 每個任務在目標 repo 下建立獨立 git worktree（`git worktree add`）
+- [x] 完成後自動清理 worktree（`git worktree remove --force`）
 
-#### 子任務管理
-- `GET /api/tasks`：列出所有子任務及其狀態（pending / running / done / error）
-- `POST /api/tasks`：建立新子任務（`{ parentSessionId, prompt, workDir? }`）
-- `GET /api/tasks/:id/stream`：SSE 串流子任務輸出
-- `DELETE /api/tasks/:id`：取消/終止子任務
+#### WS 事件廣播
+- [x] `task:created` — 任務建立時廣播給所有連線
+- [x] `task:progress` — streaming 輸出（每次有新 chunk 即推送）
+- [x] `task:done` — 任務完成
+- [x] `task:error` — 任務失敗（含錯誤訊息）
+- [x] `task:cancelled` — 任務被取消
 
 #### 前端 UI
-- 側邊欄：主 session 下方縮排顯示子任務列表，帶狀態 icon
-- 點擊子任務：展開右側面板顯示該子任務的對話內容
-- 子任務完成時：在主對話插入摘要訊息（可設定是否自動插入）
-- 多個子任務可同時顯示（split-view 或 tab 方式）
+- [x] Sidebar 新增「📋 任務」tab，Running 任務數顯示 badge
+- [x] TasksPanel：任務列表、狀態 icon（running spinner / done / error / cancelled）
+- [x] 點擊任務展開完整對話記錄（含 streaming 即時顯示）
+- [x] 取消（執行中）/ 刪除（已完成）按鈕
+- [x] 任務完成 / 失敗時 toast 通知（右下角）
 
-#### 進度追蹤
-- 子任務 status：`pending` / `running` / `done` / `error`
-- 每個子任務顯示：開始時間、執行時長、最後一條訊息
-- 主對話可以「等待所有子任務完成」再繼續
+#### 資料持久化
+- [x] SQLite `tasks` 表 + `task_messages` 表（`db.ts`）
+- [x] Server 重啟後自動把殘留 `running` 狀態改為 `error`
 
-#### 資料模型
+#### 實際資料模型
 
 ```typescript
-interface Task {
+interface TaskInfo {
   id: string;
-  parentSessionId: string;
-  prompt: string;           // 任務描述
-  workDir?: string;         // 工作目錄（可與主 session 不同）
-  status: 'pending' | 'running' | 'done' | 'error';
+  repoPath: string;
+  worktreeName: string | null;
+  branchName: string | null;
+  prompt: string;
+  status: 'running' | 'done' | 'error' | 'cancelled';
+  messages: TaskMessage[];
+  streaming: string;
   createdAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  sessionId: string;        // 對應的 CLI session ID
-  messages: StoredMessage[];
-  result?: string;          // 完成後的摘要
+  updatedAt: number;
 }
 ```
 
-#### 技術實作要點
-- 每個子任務 = 一個獨立的 `runClaude()` 呼叫，有自己的 session ID
-- 子任務 CLI process 可平行執行（不受 session lock 影響，因為各自獨立 UUID）
-- 子任務輸出透過 WS broadcast 到所有訂閱者
-- 取消：`child.kill()` + 狀態更新
-- 並行限制：可設定 MAX_PARALLEL_TASKS（建議 3-5）
+### 設計決策（與原計劃不同之處）
 
-### 實作順序
-
-1. **後端 task store**（`task-store.ts`）：類似 `store.ts`，管理 Task 狀態
-2. **REST API**：`/api/tasks` CRUD
-3. **執行引擎**：`runTask()` 呼叫 `runClaude()`，結果寫回 task store
-4. **WS 事件**：新增 `task-chunk`、`task-done`、`task-error` 事件類型
-5. **前端 sidebar**：子任務列表 UI
-6. **前端 task panel**：子任務對話內容展示
-7. **整合測試**：多任務並行 + 取消 + 超時
+| 原計劃 | 實際實作 | 原因 |
+|---|---|---|
+| `/task` slash command | 不實作，純 AI 派工 | 保持介面簡潔，dispatch 由 Claude 判斷 |
+| SSE stream | WebSocket broadcast | 統一用現有 WS 連線，不增加新協議 |
+| Sidebar 縮排子任務 | 獨立「任務」tab | 任務非 session 子項，tab 更清晰 |
+| MAX 3-5 並行 | MAX 20 | 使用 worktree 隔離，不受 session lock 限制 |
+| parentSessionId | 不追蹤 parent | 任務完全獨立，不需要關聯主 session |
 
 ---
 

@@ -53,6 +53,7 @@ claudecode-remote/
 │   ├── uninstall.ps1 / uninstall.sh # One-click uninstall
 │   ├── start.sh / stop.sh           # Mac manual start/stop
 ├── watchdog.ps1              # Windows: restart if port dies
+├── watchdog.vbs              # Windows: VBScript wrapper (silent Task Scheduler trigger)
 ├── start-hidden.ps1          # Windows: manual start
 └── stop.ps1                  # Windows: manual stop
 ```
