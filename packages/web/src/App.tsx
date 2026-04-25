@@ -692,6 +692,19 @@ export default function App() {
           setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'cancelled' as const, streaming: '', updatedAt: Date.now() } : t))
           break
         }
+
+        // Sub-task result injected into main conversation by server
+        case 'inject': {
+          const injected = data.message as { role: string; content: string; timestamp: number }
+          if (injected?.content) {
+            setMessages(prev => [...prev, {
+              role: injected.role as 'user' | 'assistant',
+              content: injected.content,
+              timestamp: injected.timestamp ?? Date.now(),
+            }])
+          }
+          break
+        }
       }
     }
   }, [resumeSession, fetchSessions, fetchTasks, addToast])

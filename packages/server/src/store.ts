@@ -15,7 +15,8 @@ export type SessionEvent =
   | { type: "done" }
   | { type: "cancelled" }
   | { type: "reconnecting" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "inject"; message: { role: "assistant"; content: string; timestamp: number } };
 
 export interface SessionState {
   id: string;

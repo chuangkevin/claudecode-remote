@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import treeKill from "tree-kill";
 import { config } from "./config.js";
 import type { StoredMessage } from "./store.js";
 
@@ -88,7 +89,24 @@ const DEFAULT_SYSTEM_PROMPT = `你是 Kevin 的 AI 開發助手。
 - 找根本原因，不只修表面症狀
 - Kevin 說「快點」就是真的很急
 - 發現問題就要修正，不要只回報不動手
-- 進度要主動回報`;
+- 進度要主動回報
+
+## 子任務自動派工
+當你判斷有部分工作可以交給獨立 agent 並行執行（例如跨 repo 修改、大型重構、長跑任務），
+在回應末尾加上派工指令，每個指令一行：
+
+格式（指定 repo）：[DISPATCH:repoPath|任務描述]
+格式（預設 workspace）：[DISPATCH:任務描述]
+
+範例：
+[DISPATCH:D:\\GitClone\\_HomeProject\\other-repo|重構 auth.ts 的錯誤處理，加上 retry 邏輯]
+[DISPATCH:更新 README.md 的 API 文件章節]
+
+規則：
+- DISPATCH 指令放在正文之後（不要夾在說明中間）
+- repoPath 用 | 與任務描述分隔；如果省略 repoPath 就用預設工作目錄
+- 每個指令建立一個獨立 Claude agent，完成後結果會自動回報到這個對話
+- 不需要等待子任務完成，繼續回應使用者即可`;
 
 function resolveSystemPrompt(userSystemPrompt?: string): string {
   return userSystemPrompt?.trim() ? userSystemPrompt.trim() : DEFAULT_SYSTEM_PROMPT;
@@ -117,12 +135,23 @@ function clearIdleTimer(proc: ManagedProcess): void {
   if (proc.idleTimer) { clearTimeout(proc.idleTimer); proc.idleTimer = null; }
 }
 
+function killProcessSafely(proc: ManagedProcess): void {
+  const pid = proc.child.pid;
+  if (!pid) return;
+
+  treeKill(pid, "SIGKILL", (err) => {
+    if (err && !err.message.includes("no such process")) {
+      console.error(`[claude] failed to kill process tree ${pid}:`, err.message);
+    }
+  });
+}
+
 function startIdleTimer(sessionId: string, proc: ManagedProcess): void {
   clearIdleTimer(proc);
   proc.idleTimer = setTimeout(() => {
     console.log(`[claude] session ${sessionId} idle ${IDLE_TIMEOUT_MS / 60_000}m — killing process`);
     pool.delete(sessionId);
-    try { proc.child.kill(); } catch { /* already dead */ }
+    killProcessSafely(proc);
   }, IDLE_TIMEOUT_MS);
 }
 
@@ -208,8 +237,12 @@ function spawnProcess(sessionId: string): ManagedProcess {
     env,
   });
 
-  // Suppress EPIPE if we write after the child dies
-  child.stdin.on("error", () => {});
+  // Handle stdin errors (EPIPE, pipe broken, etc.)
+  // These are logged to help diagnose write failures but not propagated
+  // because the process exit handler will reject the pending promise.
+  child.stdin.on("error", (err) => {
+    console.error(`[claude] stdin error for session ${sessionId}:`, err.message);
+  });
 
   const proc: ManagedProcess = {
     child,
@@ -314,7 +347,7 @@ export function runClaude(
   if (!proc || proc.child.exitCode !== null || proc.child.killed) {
     if (proc) {
       clearIdleTimer(proc);
-      try { proc.child.kill(); } catch { /* already dead */ }
+      killProcessSafely(proc);
       pool.delete(sessionId);
     }
     proc = spawnProcess(sessionId);
@@ -360,10 +393,42 @@ export function runClaude(
         ]
       : text;
 
-    p.child.stdin!.write(
-      JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n",
-      "utf8",
-    );
+    // Write to stdin with error handling — if write fails immediately,
+    // reject the promise. Async errors (EPIPE after process dies) are
+    // handled by the stdin error listener and process exit handler.
+    try {
+      const payload = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+      const success = p.child.stdin!.write(payload, "utf8", (err) => {
+        if (err) {
+          console.error(`[claude] stdin write callback error for session ${sessionId}:`, err.message);
+          // If the promise is still pending, reject it
+          if (p.status === "running" && p.reject) {
+            const currentReject = p.reject;
+            p.status = "idle";
+            p.resolve = undefined;
+            p.reject = undefined;
+            p.onChunk = undefined;
+            p.onThinking = undefined;
+            currentReject(new Error(`Failed to write to stdin: ${err.message}`));
+          }
+        }
+      });
+
+      // If write buffer is full (backpressure), log a warning but don't fail
+      if (!success) {
+        console.warn(`[claude] stdin write backpressure for session ${sessionId} — buffered`);
+      }
+    } catch (err) {
+      // Synchronous write error (rare) — reject immediately
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[claude] stdin write sync error for session ${sessionId}:`, errMsg);
+      p.status = "idle";
+      p.resolve = undefined;
+      p.reject = undefined;
+      p.onChunk = undefined;
+      p.onThinking = undefined;
+      reject(new Error(`Failed to write to stdin: ${errMsg}`));
+    }
   });
 }
 
@@ -410,4 +475,13 @@ export function poolStats(): { sessionId: string; status: string; messageCount: 
     status: p.status,
     messageCount: p.messageCount,
   }));
+}
+
+/**
+ * Get the CLI process status for a session (if it exists).
+ * Returns "idle" if no process exists (e.g., after crash or cleanup).
+ */
+export function getProcessStatus(sessionId: string): "idle" | "running" {
+  const proc = pool.get(sessionId);
+  return proc?.status ?? "idle";
 }

@@ -29,6 +29,7 @@ export interface TaskInfo {
   streaming: string;
   createdAt: number;
   updatedAt: number;
+  parentSessionId?: string;
 }
 
 interface ActiveTask extends TaskInfo {
@@ -122,13 +123,18 @@ function finishTask(task: ActiveTask, status: TaskStatus, errorMsg?: string): vo
   const evType = status === "done" ? "task:done"
     : status === "cancelled" ? "task:cancelled"
     : "task:error";
-  taskEvents.emit(evType, { type: evType, taskId: task.id, ...(errorMsg ? { message: errorMsg } : {}) });
+  taskEvents.emit(evType, {
+    type: evType,
+    taskId: task.id,
+    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+    ...(errorMsg ? { message: errorMsg } : {}),
+  });
   console.log(`[task] ${task.id.slice(0, 8)} finished → ${status}`);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export function createTask(params: { repoPath?: string; prompt: string }): TaskInfo | { error: string } {
+export function createTask(params: { repoPath?: string; prompt: string; parentSessionId?: string }): TaskInfo | { error: string } {
   if (runningCount() >= MAX_CONCURRENT) {
     return { error: `已達最大並行上限 (${MAX_CONCURRENT})` };
   }
@@ -172,6 +178,7 @@ export function createTask(params: { repoPath?: string; prompt: string }): TaskI
     proc: null,
     buf: "",
     emittedLength: 0,
+    ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
   };
   activeTasks.set(taskId, task);
 

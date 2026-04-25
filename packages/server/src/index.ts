@@ -5,17 +5,35 @@ import { join } from "node:path";
 import { config } from "./config.js";
 import { setupWebSocketHandler } from "./websocket.js";
 import { getSettings, saveSettings } from "./settings.js";
-import { initDb, migrateFromJson, dbLoadAllSessions, dbLoadMessages, dbUpsertSession, dbLoadTaskMessages } from "./db.js";
-import { loadSession } from "./store.js";
+import { initDb, migrateFromJson, dbLoadAllSessions, dbLoadMessages, dbUpsertSession, dbLoadTaskMessages, dbInsertMessage } from "./db.js";
+import { loadSession, getSession, broadcast } from "./store.js";
 import type { StoredMessage } from "./store.js";
 import { storeImage } from "./image-store.js";
-import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb } from "./task-manager.js";
+import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb, taskEvents } from "./task-manager.js";
 
 // ── DB init + startup load ────────────────────────────────────────────────────
 
 initDb();
 migrateFromJson(join(config.claudeDataDir, "claudecode-remote.json"));
 loadTasksFromDb();
+
+// When a sub-task finishes with a parentSessionId, inject the result into
+// the parent session as a new assistant message and broadcast to subscribers.
+taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (!ev.parentSessionId) return;
+  const session = getSession(ev.parentSessionId);
+  if (!session) return;
+  const task = getTask(ev.taskId);
+  const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
+  const summary = lastMsg?.content?.slice(0, 400) ?? "（無輸出）";
+  const prompt  = task?.prompt.slice(0, 80) ?? "";
+  const content = `📋 **子任務完成**：${prompt}\n\n${summary}`;
+  const msg = { role: "assistant" as const, content, timestamp: Date.now() };
+  session.messages.push(msg);
+  broadcast(session, { type: "inject", message: msg });
+  try { dbInsertMessage(ev.parentSessionId, "assistant", content); } catch { /* best-effort */ }
+  console.log(`[dispatch] injected result into session ${ev.parentSessionId.slice(0, 8)}`);
+});
 
 // Pre-load all persisted sessions into the in-memory store so they are
 // immediately available when clients resume or send chat messages.

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { runClaude, cancelSession, getProcessStatus } from "./claude.js";
+import { createTask } from "./task-manager.js";
 import { getImage } from "./image-store.js";
 import { getSettings } from "./settings.js";
 import { dbUpsertSession, dbInsertMessage, dbLoadMessages } from "./db.js";
@@ -211,7 +212,26 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             .then(() => {
               activeSession.lastRunFinishedAt = Date.now();
               activeSession.status = "idle";  // Set idle FIRST so reconnect sees correct state
-              const content = activeSession.streaming;
+              const rawContent = activeSession.streaming;
+
+              // Detect [DISPATCH:repoPath|prompt] or [DISPATCH:prompt] tags
+              // repoPath|prompt uses pipe to safely handle Windows drive-letter paths (D:\...)
+              const DISPATCH_RE = /\[DISPATCH:([^\]]+)\]/g;
+              let dispatchMatch: RegExpExecArray | null;
+              while ((dispatchMatch = DISPATCH_RE.exec(rawContent)) !== null) {
+                const inner = dispatchMatch[1];
+                const pipeIdx = inner.indexOf("|");
+                const repoPath = pipeIdx >= 0 ? inner.slice(0, pipeIdx).trim() || undefined : undefined;
+                const prompt   = pipeIdx >= 0 ? inner.slice(pipeIdx + 1).trim() : inner.trim();
+                if (prompt) {
+                  createTask({ repoPath, prompt, parentSessionId: activeSession.id });
+                  console.log(`[ws] auto-dispatch: "${prompt.slice(0, 60)}" repo=${repoPath ?? "default"}`);
+                }
+              }
+
+              // Strip DISPATCH tags from stored content so history is clean
+              const content = rawContent.replace(/\n?\[DISPATCH:[^\]]+\]/g, "").trimEnd();
+
               activeSession.messages.push({ role: "assistant", content, timestamp: Date.now() });
               activeSession.streaming = "";
               broadcast(activeSession, { type: "done" });
