@@ -110,7 +110,7 @@ function MarkdownContent({ content }: { content: string }) {
         h1: ({ children }) => <h1 className="text-lg font-bold mt-3 mb-1 text-gray-100">{children}</h1>,
         h2: ({ children }) => <h2 className="text-base font-semibold mt-3 mb-1 text-gray-100">{children}</h2>,
         h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1 text-gray-200">{children}</h3>,
-        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed break-all">{children}</p>,
         ul: ({ children }) => <ul className="list-disc list-outside pl-4 mb-2 space-y-0.5">{children}</ul>,
         ol: ({ children }) => <ol className="list-decimal list-outside pl-4 mb-2 space-y-0.5">{children}</ol>,
         li: ({ children }) => <li className="leading-relaxed">{children}</li>,
@@ -274,13 +274,13 @@ function TasksPanel({ tasks, onCancel, onDelete }: {
                     {task.messages.map((msg, i) => (
                       <div key={i} className={`text-xs ${msg.role === 'user' ? 'text-blue-300' : 'text-gray-300'}`}>
                         <span className="text-gray-600 mr-1">{msg.role === 'user' ? 'You:' : 'Claude:'}</span>
-                        <span className="whitespace-pre-wrap break-words">{msg.content}</span>
+                        <span className="whitespace-pre-wrap break-all">{msg.content}</span>
                       </div>
                     ))}
                     {task.streaming && (
                       <div className="text-xs text-gray-300">
                         <span className="text-gray-600 mr-1">Claude:</span>
-                        <span className="whitespace-pre-wrap break-words">{task.streaming}</span>
+                        <span className="whitespace-pre-wrap break-all">{task.streaming}</span>
                         <span className="animate-pulse">▌</span>
                       </div>
                     )}
@@ -855,7 +855,7 @@ export default function App() {
             )}
             {messages.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[80%] rounded-xl px-4 py-2.5 ${
+                <div className={`max-w-[80%] min-w-0 overflow-hidden rounded-xl px-4 py-2.5 ${
                   msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-800 border border-gray-700 text-gray-100'
                 }`}>
                   {msg.imagePreviews && msg.imagePreviews.length > 0 && (
@@ -871,7 +871,7 @@ export default function App() {
                       <MarkdownContent content={msg.content} />
                     </div>
                   ) : (
-                    <div className="whitespace-pre-wrap break-words text-sm">{msg.content}</div>
+                    <div className="whitespace-pre-wrap break-all text-sm">{msg.content}</div>
                   )}
                   <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
                     {new Date(msg.timestamp).toLocaleTimeString('zh-TW')}
