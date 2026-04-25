@@ -2,20 +2,39 @@
 
 ## Project Overview
 
-Web interface for Claude Code CLI. Lets users access Claude Code from any device (phone, tablet, browser). Supports real-time streaming, image upload, session management, and persistent CLI processes per session.
+Web interface for Claude Code CLI. Lets users access Claude Code from any device (phone, tablet, browser). Supports real-time streaming, image upload, session management, persistent CLI processes per session, and multi-agent task dispatch.
 
 ## Architecture
 
-- **Backend**: Fastify + `@fastify/websocket` on port 9224
-- **Frontend**: React + Vite + Tailwind CSS (single `App.tsx`)
-- **CLI bridge**: `packages/server/src/claude.ts` — persistent process pool, one CLI process per session
+- **Backend**: Fastify + `@fastify/websocket` on port 9224; SQLite for persistence
+- **Frontend**: React + Vite + Tailwind CSS (`packages/web/src/App.tsx`)
+- **Chat bridge**: `packages/server/src/claude.ts` — persistent CLI process pool, one per session
+- **Task bridge**: `packages/server/src/task-manager.ts` — up to 20 parallel agents, each in a git worktree
+
+## Key Files
+
+| File | Purpose |
+|---|---|
+| `packages/server/src/index.ts` | Fastify entry, REST API routes |
+| `packages/server/src/websocket.ts` | WS handler (chat, resume, cancel, task event fanout) |
+| `packages/server/src/claude.ts` | Chat CLI pool, 5-min idle timeout |
+| `packages/server/src/task-manager.ts` | Task agent pool, worktree lifecycle, EventEmitter |
+| `packages/server/src/store.ts` | In-memory session state, broadcast |
+| `packages/server/src/db.ts` | SQLite schema + CRUD (sessions, messages, tasks, task_messages) |
+| `packages/web/src/App.tsx` | Full React SPA |
 
 ## Key Design Decisions
 
-- `--no-session-persistence` flag: avoids Windows session lock; our sessions are tracked in `sessionMeta` (not `~/.claude/projects/`)
-- Persistent CLI process per session: messages written to stdin, resolved on `type: "result"` events; 5-min idle timeout
-- History injection: only on first message to a freshly spawned process (`buildContextualMessage`)
-- Default system prompt: defined in `claude.ts` as `DEFAULT_SYSTEM_PROMPT`; user overrides replace it entirely
+- `--no-session-persistence`: avoids Windows session lock; sessions tracked in DB, not `~/.claude/projects/`
+- Persistent CLI process per session: messages written to stdin, resolved on `type: "result"` event; 5-min idle kill
+- History injection: only on first message of freshly spawned process (`buildMessageText`)
+- Default system prompt: `DEFAULT_SYSTEM_PROMPT` in `claude.ts`; user override in Settings replaces entirely
+- Task agents: each spawns its own CLI process in a git worktree; `KeepAlive` not applicable (single run)
+- Task events fan-out: `taskEvents` EventEmitter → subscribed per WS connection → forwarded as `task:*` messages
+
+## Task Dispatch Design
+
+Task dispatch is AI-driven — Claude decides when to spin up sub-agents based on conversation context. The backend API (`POST /api/tasks`) is the integration point; Claude CLI calls it via tool use or direct HTTP. Do **not** add manual dispatch UI to the frontend.
 
 ## Development Rules
 
@@ -23,22 +42,18 @@ Web interface for Claude Code CLI. Lets users access Claude Code from any device
 - Prefer smallest correct fix; no refactors beyond the task
 - No magic numbers — use named constants
 - No silent fallbacks — surface errors to the user
+- Every code change: build → commit → push (do not skip)
 
-## Completion Checklist
-
-Every code change must:
-1. Build clean: `npm run build`
-2. Pass E2E: `npx playwright test`
-3. Commit and push to `main`
-
-## Commands
+## Build & Deploy
 
 ```bash
-npm install          # install deps
-npm run build        # build server + web
-node packages/server/dist/index.js  # start server (port 9224)
-npx playwright test  # E2E tests (server must be running)
+npm install          # install all workspace deps
+npm run build        # build server (tsc) + web (vite)
 ```
+
+**Windows**: `.\start-hidden.ps1` / `.\stop.ps1`
+**Mac**: `bash scripts/start.sh` / `bash scripts/stop.sh`
+**Full install**: `scripts/install.ps1` (Win) or `bash scripts/install.sh` (Mac)
 
 ## Environment Variables
 
@@ -46,5 +61,35 @@ npx playwright test  # E2E tests (server must be running)
 |---|---|---|
 | `PORT` | 9224 | Server port |
 | `HOST` | 0.0.0.0 | Listen address |
-| `WORKSPACE_ROOT` | `process.cwd()` | Claude CLI working directory |
-| `CLAUDE_DATA_DIR` | `~/.claude` | Claude data directory |
+| `WORKSPACE_ROOT` | `process.cwd()` | Default Claude working directory |
+| `CLAUDE_DATA_DIR` | `~/.claude` | DB + auth storage |
+
+## API Surface
+
+**Sessions**
+- `GET  /api/sessions` — list all
+- `PATCH /api/sessions/:id/rename` — rename
+- `PATCH /api/sessions/:id/pin` — pin/unpin
+
+**Tasks**
+- `POST   /api/tasks` — create agent task `{ repoPath?, prompt }`
+- `GET    /api/tasks` — list all tasks
+- `DELETE /api/tasks/:id` — cancel + cleanup
+- `GET    /api/tasks/:id/transcript` — full message history
+
+**Other**
+- `GET  /api/health`
+- `GET  /api/settings` / `POST /api/settings`
+- `POST /api/upload-image`
+- `GET  /api/ws` — WebSocket
+
+## WebSocket Message Types
+
+**Server → Client (session)**
+`connected`, `session`, `chunk`, `thinking`, `done`, `cancelled`, `reconnecting`, `error`, `pong`
+
+**Server → Client (tasks, broadcast)**
+`task:created`, `task:progress`, `task:done`, `task:error`, `task:cancelled`
+
+**Client → Server**
+`ping`, `resume`, `chat`, `cancel`

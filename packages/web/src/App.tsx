@@ -184,70 +184,6 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
   )
 }
 
-// ── Dispatch modal ────────────────────────────────────────────────────────────
-
-function DispatchModal({ onClose, onSubmit }: {
-  onClose: () => void
-  onSubmit: (repoPath: string, prompt: string) => void
-}) {
-  const [repoPath, setRepoPath] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const promptRef = useRef<HTMLTextAreaElement>(null)
-
-  useEffect(() => { promptRef.current?.focus() }, [])
-
-  const submit = () => {
-    if (!prompt.trim()) return
-    onSubmit(repoPath.trim(), prompt.trim())
-    onClose()
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 w-[500px] max-w-[calc(100vw-2rem)] mx-4 shadow-2xl"
-           onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-gray-100">⚡ 派任務</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300">✕</button>
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs text-gray-400 mb-1 block">Repo 路徑（留空使用預設 workspace）</label>
-            <input
-              value={repoPath}
-              onChange={e => setRepoPath(e.target.value)}
-              placeholder="D:\GitClone\_HomeProject\my-project"
-              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-400 mb-1 block">任務描述 *</label>
-            <textarea
-              ref={promptRef}
-              value={prompt}
-              onChange={e => setPrompt(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit() }}
-              placeholder="描述要做什麼，例如：讀 CLAUDE.md 然後寫一個 hello world 函數"
-              rows={5}
-              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-            />
-            <div className="text-xs text-gray-600 mt-1">Ctrl+Enter 送出</div>
-          </div>
-          <div className="flex gap-2 pt-1">
-            <button onClick={submit} disabled={!prompt.trim()}
-              className="flex-1 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 transition-colors">
-              派出去 ⚡
-            </button>
-            <button onClick={onClose} className="px-4 py-2 bg-gray-700 text-gray-300 text-sm rounded-lg hover:bg-gray-600 transition-colors">
-              取消
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ── Toast notifications ───────────────────────────────────────────────────────
 
 function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: string) => void }) {
@@ -277,9 +213,8 @@ function TaskStatusBadge({ status }: { status: TaskInfo['status'] }) {
 
 // ── Tasks panel ───────────────────────────────────────────────────────────────
 
-function TasksPanel({ tasks, onNew, onCancel, onDelete }: {
+function TasksPanel({ tasks, onCancel, onDelete }: {
   tasks: TaskInfo[]
-  onNew: () => void
   onCancel: (id: string) => void
   onDelete: (id: string) => void
 }) {
@@ -287,11 +222,8 @@ function TasksPanel({ tasks, onNew, onCancel, onDelete }: {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-3 pt-4 pb-2 flex items-center gap-2">
-        <button onClick={onNew}
-          className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium transition-colors">
-          <span className="text-base leading-none">⚡</span> 新任務
-        </button>
+      <div className="px-3 pt-4 pb-2">
+        <p className="text-xs text-gray-600 px-1">任務由 AI 自動派工</p>
       </div>
 
       <div className="flex-1 overflow-y-auto py-1">
@@ -387,7 +319,6 @@ interface SidebarProps {
   onPin: (id: string, pinned: boolean) => Promise<void>
   tasks: TaskInfo[]
   runningTaskCount: number
-  onNewTask: () => void
   onCancelTask: (id: string) => void
   onDeleteTask: (id: string) => void
 }
@@ -395,7 +326,7 @@ interface SidebarProps {
 function Sidebar({
   tab, onTabChange,
   sessions, activeId, onSelect, onNew, onRefresh, onRename, onPin,
-  tasks, runningTaskCount, onNewTask, onCancelTask, onDeleteTask,
+  tasks, runningTaskCount, onCancelTask, onDeleteTask,
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
@@ -506,7 +437,6 @@ function Sidebar({
       ) : (
         <TasksPanel
           tasks={tasks}
-          onNew={onNewTask}
           onCancel={onCancelTask}
           onDelete={onDeleteTask}
         />
@@ -534,7 +464,6 @@ export default function App() {
   const [isReconnecting, setIsReconnecting] = useState(false)
   const [messageQueue, setMessageQueue] = useState<string[]>([])
   const [tasks, setTasks] = useState<TaskInfo[]>([])
-  const [showDispatch, setShowDispatch] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
 
   const currentResponseRef = useRef('')
@@ -594,25 +523,6 @@ export default function App() {
   const deleteTask = async (taskId: string) => {
     await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' })
     setTasks(prev => prev.filter(t => t.id !== taskId))
-  }
-
-  const dispatchTask = async (repoPath: string, prompt: string) => {
-    try {
-      const res = await fetch('/api/tasks', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoPath, prompt }),
-      })
-      if (!res.ok) {
-        const { error } = await res.json() as { error: string }
-        addToast(`派任務失敗：${error}`, 'error')
-        return
-      }
-      setSidebarTab('tasks')
-      setSidebarOpen(true)
-    } catch {
-      addToast('派任務失敗：網路錯誤', 'error')
-    }
   }
 
   const resumeSession = useCallback((ws: WebSocket, sessionId: string | null) => {
@@ -886,13 +796,6 @@ export default function App() {
 
   return (
     <div className="flex bg-gray-900 text-gray-100 overflow-hidden" style={{ height: '100dvh' }}>
-      {showDispatch && (
-        <DispatchModal
-          onClose={() => setShowDispatch(false)}
-          onSubmit={dispatchTask}
-        />
-      )}
-
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
       {/* Mobile overlay backdrop */}
@@ -918,7 +821,6 @@ export default function App() {
           onPin={pinSession}
           tasks={tasks}
           runningTaskCount={runningTaskCount}
-          onNewTask={() => setShowDispatch(true)}
           onCancelTask={cancelTask}
           onDeleteTask={deleteTask}
         />
@@ -934,16 +836,6 @@ export default function App() {
             <h1 className="text-base font-semibold text-gray-100">Claude Code Remote</h1>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setShowDispatch(true)}
-              title="派任務"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 text-xs rounded-lg transition-colors">
-              ⚡ 派任務
-              {runningTaskCount > 0 && (
-                <span className="w-4 h-4 bg-yellow-500 text-gray-900 text-xs rounded-full flex items-center justify-center font-bold leading-none">
-                  {runningTaskCount}
-                </span>
-              )}
-            </button>
             <button onClick={() => setShowSettings(s => !s)} title="System Prompt"
               className={`text-lg transition-colors ${showSettings ? 'text-blue-400' : 'text-gray-500 hover:text-gray-300'}`}>⚙</button>
             <div className="flex items-center gap-1.5">
