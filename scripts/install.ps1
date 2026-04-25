@@ -1,98 +1,117 @@
 # claudecode-remote — Windows one-click install
-# Run from project root or scripts/ directory:
-#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-[CmdletBinding()]
+# Usage: powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 param([int]$Port = 9224)
 
-$ErrorActionPreference = "Stop"
-$ScriptDir  = Split-Path $MyInvocation.MyCommand.Path -Parent
-$ProjectRoot = if ($ScriptDir -match "scripts$") { Split-Path $ScriptDir -Parent } else { $ScriptDir }
+# No $ErrorActionPreference = "Stop" — PS 5.1 wraps native-command stderr as
+# ErrorRecords when 2>&1 is used, which would cause false terminating errors.
 
-function Step($msg) { Write-Host "`n>> $msg" -ForegroundColor Cyan }
-function Ok($msg)   { Write-Host "   ✓ $msg"  -ForegroundColor Green }
-function Warn($msg) { Write-Host "   ⚠ $msg"  -ForegroundColor Yellow }
-function Fail($msg) { Write-Host "   ✗ $msg"  -ForegroundColor Red; exit 1 }
+$ScriptDir   = Split-Path $MyInvocation.MyCommand.Path -Parent
+$ProjectRoot = if ($ScriptDir -match '[/\\]scripts$') { Split-Path $ScriptDir -Parent } else { $ScriptDir }
 
-Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   ClaudeCode Remote — Windows Setup  ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host "   Project: $ProjectRoot"
+function Step($msg) { Write-Host "" ; Write-Host ">> $msg" -ForegroundColor Cyan }
+function Ok($msg)   { Write-Host "   OK  $msg" -ForegroundColor Green }
+function Warn($msg) { Write-Host "   !!  $msg" -ForegroundColor Yellow }
+function Fail($msg) { Write-Host "   ERR $msg" -ForegroundColor Red ; exit 1 }
+
+Write-Host "=== ClaudeCode Remote - Windows Install ===" -ForegroundColor Cyan
+Write-Host "    Project: $ProjectRoot"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 Step "Checking prerequisites"
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail "Node.js not found — install from https://nodejs.org" }
-$nodeVer = node --version
-if (-not (Get-Command git  -ErrorAction SilentlyContinue)) { Fail "Git not found" }
-Ok "Node $nodeVer, Git $(git --version)"
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Fail "Node.js not found - install from https://nodejs.org"
+}
+$nodeVer = (node --version 2>&1) | Select-Object -First 1
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Fail "Git not found"
+}
+Ok "Node $nodeVer"
 
 # ── 2. .env ───────────────────────────────────────────────────────────────────
 Step "Checking .env"
-$envFile = "$ProjectRoot\.env"
+$envFile = Join-Path $ProjectRoot ".env"
 if (-not (Test-Path $envFile)) {
-    $example = "$ProjectRoot\.env.example"
+    $example = Join-Path $ProjectRoot ".env.example"
     if (Test-Path $example) {
         Copy-Item $example $envFile
-        Warn ".env created from .env.example — review it before first use"
+        Warn ".env created from .env.example - review it before first use"
     } else {
-        Set-Content $envFile "PORT=$Port`nWORKSPACE_ROOT=$env:USERPROFILE"
-        Warn "Minimal .env created — edit $envFile as needed"
+        Set-Content $envFile "PORT=$Port`r`nWORKSPACE_ROOT=$env:USERPROFILE"
+        Warn "Minimal .env created - edit $envFile as needed"
     }
-} else { Ok ".env exists" }
+} else {
+    Ok ".env exists"
+}
 
 # ── 3. npm install ────────────────────────────────────────────────────────────
 Step "Installing npm dependencies"
-Set-Location $ProjectRoot
-npm install --silent 2>&1 | Out-Null
+Push-Location $ProjectRoot
+npm install
+if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "npm install failed" }
 Ok "Dependencies installed"
 
 # ── 4. Build ──────────────────────────────────────────────────────────────────
 Step "Building server + web"
-$buildOut = npm run build 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Host $buildOut; Fail "Build failed" }
+npm run build
+if ($LASTEXITCODE -ne 0) { Pop-Location; Fail "Build failed" }
+Pop-Location
 Ok "Build complete"
 
 # ── 5. Registry Run key (login auto-start) ────────────────────────────────────
-Step "Registering login auto-start"
-$regKey  = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$regName = "ClaudeCodeRemote"
+Step "Registering login auto-start (Registry Run key)"
+$regKey   = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startCmd = "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ProjectRoot\start-hidden.ps1`""
-Set-ItemProperty -Path $regKey -Name $regName -Value $startCmd
-Ok "Registry HKCU\Run\ClaudeCodeRemote set"
+try {
+    Set-ItemProperty -Path $regKey -Name "ClaudeCodeRemote" -Value $startCmd -ErrorAction Stop
+    Ok "Registry HKCU\Run\ClaudeCodeRemote set"
+} catch {
+    Warn "Could not set Registry entry: $_"
+}
 
 # ── 6. Task Scheduler watchdog (every 1 minute) ───────────────────────────────
-Step "Creating watchdog task (Task Scheduler, every minute)"
-schtasks /delete /tn "ClaudeCodeRemote-Watchdog" /f 2>$null | Out-Null
+Step "Creating Task Scheduler watchdog (every minute)"
 $watchCmd = "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ProjectRoot\watchdog.ps1`""
-$result = schtasks /create /tn "ClaudeCodeRemote-Watchdog" /tr $watchCmd /sc minute /mo 1 /ru "$env:USERNAME" /f 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Warn "Watchdog task failed (may need admin): $result"
-    Warn "Run as Administrator to enable the watchdog"
-} else { Ok "Watchdog task created" }
+
+# Remove existing task (ignore errors if not present)
+& schtasks.exe /delete /tn "ClaudeCodeRemote-Watchdog" /f 2>$null
+Start-Sleep -Milliseconds 500
+
+$createResult = & schtasks.exe /create `
+    /tn "ClaudeCodeRemote-Watchdog" `
+    /tr $watchCmd `
+    /sc minute /mo 1 `
+    /ru $env:USERNAME /f 2>&1
+
+if ($LASTEXITCODE -eq 0) {
+    Ok "Watchdog task created (runs every minute, auto-restarts on crash)"
+} else {
+    Warn "Watchdog task creation failed (may need admin): $createResult"
+    Warn "Run this script as Administrator to enable the watchdog"
+}
 
 # ── 7. Start server ───────────────────────────────────────────────────────────
 Step "Starting server"
 & "$ProjectRoot\start-hidden.ps1"
 
 # ── 8. Health check ───────────────────────────────────────────────────────────
-Step "Verifying health"
-$ok = $false
-for ($i = 1; $i -le 10; $i++) {
+Step "Health check"
+$healthy = $false
+for ($i = 1; $i -le 15; $i++) {
     Start-Sleep -Seconds 1
     try {
-        $resp = Invoke-WebRequest -Uri "http://localhost:$Port/api/health" -UseBasicParsing -TimeoutSec 3
-        Ok "http://localhost:$Port/api/health → $($resp.Content)"
-        $ok = $true; break
+        $resp = Invoke-WebRequest -Uri "http://localhost:$Port/api/health" `
+            -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        Ok "http://localhost:$Port/api/health -> $($resp.Content)"
+        $healthy = $true
+        break
     } catch { }
 }
-if (-not $ok) { Fail "Health check failed after 10s — check server.log" }
+if (-not $healthy) { Fail "Health check failed after 15s - check server.log" }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║          Install complete!           ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Green
-Write-Host "   URL:        http://localhost:$Port" -ForegroundColor Cyan
-Write-Host "   Start:      .\start-hidden.ps1"
-Write-Host "   Stop:       .\stop.ps1"
-Write-Host "   Watchdog:   Task Scheduler > ClaudeCodeRemote-Watchdog"
-Write-Host "   Uninstall:  .\scripts\uninstall.ps1"
+Write-Host "=== Install complete! ===" -ForegroundColor Green
+Write-Host "    URL:       http://localhost:$Port" -ForegroundColor Cyan
+Write-Host "    Start:     .\start-hidden.ps1"
+Write-Host "    Stop:      .\stop.ps1"
+Write-Host "    Uninstall: .\scripts\uninstall.ps1"
