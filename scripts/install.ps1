@@ -68,21 +68,23 @@ try {
     Warn "Could not set Registry entry: $_"
 }
 
-# ── 6. Task Scheduler watchdog (every 1 minute, fully hidden) ────────────────
-Step "Creating Task Scheduler watchdog (every minute, hidden)"
+# ── 6. Task Scheduler watchdog via VBScript (every 1 minute, no window) ──────
+Step "Creating Task Scheduler watchdog (every minute, via VBScript)"
+
+# wscript.exe + watchdog.vbs: completely silent — no PowerShell window flicker
+$vbsPath = Join-Path $ProjectRoot "watchdog.vbs"
 
 # Remove existing task (ignore errors if not present)
 & schtasks.exe /delete /tn "ClaudeCodeRemote-Watchdog" /f 2>$null
 
 try {
-    $action   = New-ScheduledTaskAction -Execute "powershell.exe" `
-                    -Argument "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ProjectRoot\watchdog.ps1`""
+    $action   = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`""
     $trigger  = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 1) `
                     -Once -At (Get-Date)
     $settings = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName "ClaudeCodeRemote-Watchdog" `
         -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
-    Ok "Watchdog task created (runs every minute, fully hidden)"
+    Ok "Watchdog task created (wscript -> VBScript -> PowerShell, no window)"
 } catch {
     Warn "Watchdog task creation failed: $_"
     Warn "Run this script as Administrator to enable the watchdog"
