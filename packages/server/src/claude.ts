@@ -206,7 +206,16 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
     proc.onThinking = undefined;
     proc.resolve = undefined;
     proc.reject = undefined;
-    startIdleTimer(sessionId, proc);
+    if (isAuth) {
+      // Auth-broken process must be evicted immediately so the retry in
+      // websocket.ts spawns a completely fresh CLI process instead of
+      // reusing this one (which would get another 401).
+      pool.delete(sessionId);
+      clearIdleTimer(proc);
+      killProcessSafely(proc);
+    } else {
+      startIdleTimer(sessionId, proc);
+    }
     reject?.(new Error(isAuth ? `AUTH_401: ${msg}` : msg));
   }
   // system/init and other events are ignored
