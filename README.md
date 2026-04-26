@@ -109,6 +109,22 @@ bash scripts/uninstall.sh  # 移除全部
 | `HOST` | `0.0.0.0` | Listen address |
 | `WORKSPACE_ROOT` | `process.cwd()` | Claude CLI 工作目錄 |
 | `CLAUDE_DATA_DIR` | `~/.claude` | Claude 資料目錄（存 DB、auth） |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | 長期 OAuth token（伺服器推薦，有效期 1 年） |
+
+## 認證
+
+Server 以子行程方式呼叫 Claude Code CLI，auth 從環境繼承。
+
+**推薦做法（headless / 伺服器）：** 在 `.env` 設定 `CLAUDE_CODE_OAUTH_TOKEN`。
+透過 `claude setup-token` 取得，有效期約 1 年，不受每日 OAuth 過期影響。
+
+```powershell
+claude setup-token   # 取得長期 token
+# 貼入 .env：CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+.\stop.ps1; .\start-hidden.ps1
+```
+
+**若出現 `AUTH_401`：** 重新執行 `claude setup-token`，更新 `.env`，重啟 server。
 
 ## Task API
 

@@ -67,6 +67,23 @@ via `WshShell.Run(..., 0, False)` so no PowerShell window ever flashes.
 | `HOST` | 0.0.0.0 | Listen address |
 | `WORKSPACE_ROOT` | `process.cwd()` | Default Claude working directory |
 | `CLAUDE_DATA_DIR` | `~/.claude` | DB + auth storage |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | Long-lived OAuth token (recommended for headless server use) |
+
+## Authentication
+
+The server spawns Claude Code CLI as child processes. Auth is inherited from the environment.
+
+**Recommended (headless / server):** Set `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
+This is a long-lived token (1 year) obtained via `claude setup-token`. It does not expire daily like the browser OAuth flow.
+
+**Check auth before start:** `check-auth.ps1` runs as a pre-flight from `start-hidden.ps1`. It warns if `claudeAiOauth.expiresAt` in `~/.claude/.credentials.json` is expired or <24 h, but does not block the start when `CLAUDE_CODE_OAUTH_TOKEN` is in use (no credentials file needed).
+
+**If you see `AUTH_401` in server logs:**
+```powershell
+claude setup-token   # generates a new CLAUDE_CODE_OAUTH_TOKEN
+# then update .env with the new token and restart
+.\stop.ps1; .\start-hidden.ps1
+```
 
 ## API Surface
 
