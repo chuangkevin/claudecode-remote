@@ -103,6 +103,34 @@ interface TaskInfo {
 }
 ```
 
+### Phase 3 P1：AI 自動派工 + 結果回注（✅ 完成 2026-04-25）
+
+#### [DISPATCH:...] 模式偵測
+
+主 agent 在回覆中可嵌入 dispatch 標記，server 自動解析並建立子任務：
+
+```
+[DISPATCH:prompt]                          # 在預設 repoPath 執行
+[DISPATCH:D:\path\to\repo|prompt]          # 指定 repo（pipe 分隔，避免 Windows 路徑冒號衝突）
+```
+
+- `websocket.ts` 在每次完整回覆後用 regex 掃描 `[DISPATCH:...]`
+- 標記從送出給 client 的內容中移除（client 看不到原始標記）
+- 每個 match 呼叫 `createTask({ repoPath, prompt, parentSessionId })`
+
+#### 子任務結果回注父 Session
+
+- `task-manager.ts` 在 `finishTask()` 時 emit `task:done` 含 `parentSessionId`
+- `index.ts` 監聽 `taskEvents.on("task:done")` → 取最後一則 assistant 訊息（前 400 字）
+- 以 `📋 子任務完成：<prompt>` 格式注入父 session 的訊息列表
+- 透過 `broadcast()` 送 `{ type: "inject" }` 給所有連線的 client
+- `App.tsx` case `'inject'` → 直接 append 到 messages state
+
+#### 401 修復：pool 驅逐壞 process
+
+- `claude.ts` 偵測到 `AUTH_401` 時立即從 pool 移除該 process，不讓下次 retry 重用
+- `doRun()` retry 會取得乾淨的新 process，避免無限重試同一個壞 process
+
 ### 設計決策（與原計劃不同之處）
 
 | 原計劃 | 實際實作 | 原因 |
@@ -111,7 +139,38 @@ interface TaskInfo {
 | SSE stream | WebSocket broadcast | 統一用現有 WS 連線，不增加新協議 |
 | Sidebar 縮排子任務 | 獨立「任務」tab | 任務非 session 子項，tab 更清晰 |
 | MAX 3-5 並行 | MAX 20 | 使用 worktree 隔離，不受 session lock 限制 |
-| parentSessionId | 不追蹤 parent | 任務完全獨立，不需要關聯主 session |
+| parentSessionId 不追蹤 | 實作 parentSessionId | 子任務結果需回注主 session；pipe 格式解決 Windows 路徑冒號問題 |
+
+---
+
+## 認證（Auth）
+
+Server 以子行程方式呼叫 Claude Code CLI，auth 從環境繼承。
+
+### 推薦：長期 token（CLAUDE_CODE_OAUTH_TOKEN）
+
+```
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # 寫入 .env
+```
+
+- 透過 `claude setup-token` 取得，有效期約 1 年
+- 不依賴 `~/.claude/.credentials.json`，不受每日 OAuth 過期影響
+- Server 以 `--env-file=.env` 啟動，token 自動傳給所有子行程（CLI）
+
+### 前置檢查：check-auth.ps1
+
+`start-hidden.ps1` 啟動前呼叫 `check-auth.ps1`：
+- 讀取 `~/.claude/.credentials.json` 的 `claudeAiOauth.expiresAt`
+- 若已過期或 <24h 顯示警告（不阻擋啟動）
+- 使用 `CLAUDE_CODE_OAUTH_TOKEN` 時 credentials.json 不存在屬正常現象
+
+### 401 恢復
+
+```powershell
+claude setup-token   # 重新取得 token
+# 更新 .env 的 CLAUDE_CODE_OAUTH_TOKEN
+.\stop.ps1; .\start-hidden.ps1
+```
 
 ---
 
