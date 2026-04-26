@@ -307,7 +307,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
     if (proc.status === "running") {
       let errMsg: string;
       if (proc.authError) {
-        errMsg = "AUTH_401: Authentication expired — please re-login (run `claude /login`)";
+        errMsg = "AUTH_401: Authentication expired — run `claude setup-token` for persistent headless auth (one-time fix), or `claude login` to refresh OAuth";
       } else {
         const hint = proc.stderrBuf.toLowerCase().includes("context")
           ? " (context too long — try starting a new conversation)"

@@ -1,6 +1,9 @@
 # Start claudecode-remote in background (no pm2)
 Set-Location $PSScriptRoot
 
+# Pre-flight: warn if Claude auth token is expired
+& "$PSScriptRoot\check-auth.ps1"
+
 # Kill any stale process on port 9224
 $existing = netstat -ano | Select-String ":9224\s.*LISTENING" | ForEach-Object {
     ($_ -split "\s+")[-1]
