@@ -48,4 +48,21 @@ test-result.png
 
 # Claude Code worktrees
 .claude/worktrees/
+.worktrees/
 null
+
+# Debug & test artifacts
+test-*.log
+debug.log
+debug-err.log
+server.log
+server-new.log
+build-output.log
+pm2.log
+watchdog.log
+ws-test.log
+nul
+*.png
+test-*.mjs
+test-dispatch.mjs
+test-inject.mjs
