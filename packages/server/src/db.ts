@@ -36,14 +36,15 @@ export function initDb(): void {
     );
 
     CREATE TABLE IF NOT EXISTS tasks (
-      id            TEXT    PRIMARY KEY,
-      repo_path     TEXT    NOT NULL,
-      worktree_name TEXT,
-      branch_name   TEXT,
-      prompt        TEXT    NOT NULL,
-      status        TEXT    NOT NULL DEFAULT 'running',
-      created_at    INTEGER NOT NULL,
-      updated_at    INTEGER NOT NULL
+      id                TEXT    PRIMARY KEY,
+      repo_path         TEXT    NOT NULL,
+      worktree_name     TEXT,
+      branch_name       TEXT,
+      prompt            TEXT    NOT NULL,
+      status            TEXT    NOT NULL DEFAULT 'running',
+      parent_session_id TEXT,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS task_messages (
@@ -56,6 +57,13 @@ export function initDb(): void {
 
     CREATE INDEX IF NOT EXISTS idx_task_msg ON task_messages(task_id, created_at);
   `);
+
+  // Idempotent migration: add parent_session_id to legacy DBs that predate the column.
+  const cols = _db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+  if (!cols.some(c => c.name === "parent_session_id")) {
+    _db.exec(`ALTER TABLE tasks ADD COLUMN parent_session_id TEXT`);
+    console.log("[db] migration: added tasks.parent_session_id");
+  }
 }
 
 function db(): Database.Database {
@@ -168,20 +176,23 @@ export interface DbTask {
   branch_name: string | null;
   prompt: string;
   status: string;
+  parent_session_id: string | null;
   created_at: number;
   updated_at: number;
 }
 
 export function dbInsertTask(t: {
   id: string; repoPath: string; worktreeName: string | null;
-  branchName: string | null; prompt: string; status: string; createdAt: number;
+  branchName: string | null; prompt: string; status: string;
+  parentSessionId?: string | null; createdAt: number;
 }): void {
   const now = t.createdAt;
   db().prepare(`
-    INSERT INTO tasks (id, repo_path, worktree_name, branch_name, prompt, status, created_at, updated_at)
-    VALUES (@id, @repoPath, @worktreeName, @branchName, @prompt, @status, @now, @now)
+    INSERT INTO tasks (id, repo_path, worktree_name, branch_name, prompt, status, parent_session_id, created_at, updated_at)
+    VALUES (@id, @repoPath, @worktreeName, @branchName, @prompt, @status, @parentSessionId, @now, @now)
   `).run({ id: t.id, repoPath: t.repoPath, worktreeName: t.worktreeName ?? null,
-           branchName: t.branchName ?? null, prompt: t.prompt, status: t.status, now });
+           branchName: t.branchName ?? null, prompt: t.prompt, status: t.status,
+           parentSessionId: t.parentSessionId ?? null, now });
 }
 
 export function dbUpdateTask(id: string, fields: { status?: string; updatedAt?: number }): void {

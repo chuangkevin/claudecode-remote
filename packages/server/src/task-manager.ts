@@ -184,7 +184,8 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
 
   try {
     dbInsertTask({ id: taskId, repoPath, worktreeName: actualWorktreeName,
-                   branchName: actualBranch, prompt: params.prompt, status: "running", createdAt: now });
+                   branchName: actualBranch, prompt: params.prompt, status: "running",
+                   parentSessionId: params.parentSessionId, createdAt: now });
     dbInsertTaskMessage(taskId, "user", params.prompt);
   } catch (e) { console.error("[task] DB insert error:", e); }
 
@@ -313,6 +314,7 @@ export function loadTasksFromDb(): void {
       proc: null,
       buf: "",
       emittedLength: 0,
+      ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
     };
     activeTasks.set(row.id, task);
   }
