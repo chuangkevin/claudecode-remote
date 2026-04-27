@@ -149,6 +149,15 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             subscribeTo(target);
           }
 
+          // Sync session status with CLI process status before the check.
+          // If the process is idle but session thinks it's still running (e.g., unexpected
+          // process exit without proper cleanup, or error in the .then() handler), recover
+          // gracefully so the next message is not permanently blocked.
+          if (session.status === "running" && getProcessStatus(session.id) === "idle") {
+            session.status = "idle";
+            session.streaming = "";
+          }
+
           if (session.status === "running") {
             send(connection, { type: "error", message: "Still processing previous message" });
             return;
