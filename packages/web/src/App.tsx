@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -48,6 +48,7 @@ interface TaskInfo {
   streaming: string
   createdAt: number
   updatedAt: number
+  parentSessionId?: string
 }
 
 interface Toast {
@@ -248,6 +249,38 @@ function TaskStatusBadge({ status }: { status: TaskInfo['status'] }) {
   if (status === 'done') return <span className="text-green-400 text-xs">✓</span>
   if (status === 'error') return <span className="text-red-400 text-xs">✗</span>
   return <span className="text-gray-500 text-xs">⬛</span>
+}
+
+// ── Inline dispatched-task card (shown under assistant message that triggered it) ─
+
+function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }) {
+  const repoLabel = task.repoLabel ?? repoBasename(task.repoPath)
+  const promptPreview = task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + '…' : task.prompt
+  const statusLabel: Record<TaskInfo['status'], string> = {
+    running: '進行中',
+    done: '已完成',
+    error: '失敗',
+    cancelled: '已取消',
+  }
+  return (
+    <button
+      onClick={onOpen}
+      className="w-full text-left bg-gray-900/60 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 transition-colors flex items-start gap-2 group"
+      title="點擊跳到「任務」分頁查看完整輸出"
+    >
+      <span className="mt-0.5"><TaskStatusBadge status={task.status} /></span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-gray-300">→ 派遣到</span>
+          <code className="text-blue-300 font-mono">{repoLabel}</code>
+          <span className="text-gray-500">·</span>
+          <span className="text-gray-500">{statusLabel[task.status]}</span>
+        </div>
+        <div className="text-xs text-gray-400 mt-1 break-all whitespace-pre-wrap line-clamp-2">{promptPreview}</div>
+      </div>
+      <span className="text-gray-600 text-xs opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">查看 →</span>
+    </button>
+  )
 }
 
 // ── Tasks panel ───────────────────────────────────────────────────────────────
@@ -527,6 +560,28 @@ export default function App() {
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
+
+  // Map each assistant message index → tasks dispatched from it.
+  // Heuristic: a task belongs to the assistant message whose timestamp range
+  // (start = msg.timestamp, end = next-message.timestamp) contains task.createdAt.
+  // Works for both live events and DB-loaded history because server emits
+  // task:created AFTER the assistant message's done event.
+  const tasksByMessageIndex = useMemo(() => {
+    const map = new Map<number, TaskInfo[]>()
+    if (!activeSessionId) return map
+    const sessionTasks = tasks.filter(t => t.parentSessionId === activeSessionId)
+    if (sessionTasks.length === 0) return map
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role !== 'assistant') continue
+      const start = messages[i].timestamp
+      const end = i + 1 < messages.length ? messages[i + 1].timestamp : Number.MAX_SAFE_INTEGER
+      const matched = sessionTasks
+        .filter(t => t.createdAt >= start && t.createdAt < end)
+        .sort((a, b) => a.createdAt - b.createdAt)
+      if (matched.length > 0) map.set(i, matched)
+    }
+    return map
+  }, [messages, tasks, activeSessionId])
 
   // Persist textarea height across sessions (per-browser).
   useEffect(() => {
@@ -957,6 +1012,13 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap break-all text-sm">{msg.content}</div>
+                  )}
+                  {msg.role === 'assistant' && tasksByMessageIndex.get(idx) && (
+                    <div className="mt-2 space-y-1.5">
+                      {tasksByMessageIndex.get(idx)!.map(t => (
+                        <InlineTaskCard key={t.id} task={t} onOpen={() => setSidebarTab('tasks')} />
+                      ))}
+                    </div>
                   )}
                   <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
                     {new Date(msg.timestamp).toLocaleTimeString('zh-TW')}

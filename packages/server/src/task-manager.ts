@@ -247,6 +247,7 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     branchName: actualBranch,
     prompt: params.prompt,
     createdAt: now,
+    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
   });
   console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
   return toInfo(task);
