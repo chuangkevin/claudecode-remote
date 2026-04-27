@@ -486,6 +486,8 @@ function Sidebar({
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 
+const INPUT_HEIGHT_KEY = 'claudecode-remote:input-height'
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -497,6 +499,14 @@ export default function App() {
   const [sessions, setSessions] = useState<DiskSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [inputHeight] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null
+    const raw = localStorage.getItem(INPUT_HEIGHT_KEY)
+    if (!raw) return null
+    const n = parseInt(raw, 10)
+    return !Number.isNaN(n) && n >= 40 && n <= 800 ? n : null
+  })
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chat')
   const [longWait, setLongWait] = useState(false)
   const [currentThinking, setCurrentThinking] = useState('')
@@ -517,6 +527,22 @@ export default function App() {
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
+
+  // Persist textarea height across sessions (per-browser).
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    const saved = localStorage.getItem(INPUT_HEIGHT_KEY)
+    let lastSaved = saved ? parseInt(saved, 10) : el.offsetHeight
+    const observer = new ResizeObserver(() => {
+      const h = el.offsetHeight
+      if (h <= 0 || Math.abs(h - lastSaved) < 1) return
+      lastSaved = h
+      try { localStorage.setItem(INPUT_HEIGHT_KEY, String(h)) } catch { /* quota */ }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (!isProcessing) { setLongWait(false); return }
@@ -1044,9 +1070,10 @@ export default function App() {
             </button>
             <input ref={fileInputRef} type="file" accept={ACCEPTED} multiple className="hidden" onChange={onImagePick} />
 
-            <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
+            <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
               placeholder={isProcessing ? '輸入訊息… (Enter 排隊，Shift+Enter 換行)' : '輸入訊息… (Enter 傳送，Shift+Enter 換行)'}
-              className="flex-1 resize-none rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+              className="flex-1 resize-y min-h-[60px] max-h-[60vh] rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+              style={inputHeight ? { height: `${inputHeight}px` } : undefined}
               rows={2} disabled={!isConnected} data-processing={isProcessing} />
 
             {isProcessing && !input.trim() ? (
