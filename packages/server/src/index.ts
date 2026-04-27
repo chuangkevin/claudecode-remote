@@ -10,6 +10,8 @@ import { loadSession, getSession, broadcast } from "./store.js";
 import type { StoredMessage } from "./store.js";
 import { storeImage } from "./image-store.js";
 import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb, taskEvents } from "./task-manager.js";
+import { runClaude } from "./claude.js";
+import { addPendingDispatch, consumePendingDispatch } from "./pending-dispatch.js";
 
 // ── DB init + startup load ────────────────────────────────────────────────────
 
@@ -68,14 +70,105 @@ function injectTaskOutcome(
   console.log(`[dispatch] injected ${outcome} into session ${parentSessionId.slice(0, 8)}`);
 }
 
+// ── Orchestrator auto-continuation ────────────────────────────────────────────
+//
+// addPendingDispatch is called by websocket.ts when [DISPATCH:...] tags are
+// parsed (and below, when auto-continue itself dispatches). consumePendingDispatch
+// is called when each sub-task finishes. When the pending set drains to
+// empty AND the session is idle, autoContinueOrchestrator fires one more
+// run of the main agent with a synthetic prompt to integrate the results.
+
+const AUTO_CONTINUE_PROMPT =
+  "所有先前派遣的子任務都已結束。請依據上方各 [TASK_RESULT:...] 標記後的內容，整合結果並向使用者回應原本的問題。" +
+  "若有失敗的子任務，請告訴使用者失敗原因，並建議下一步該怎麼處理（例如：是否重新派遣、是否需要使用者補資訊）。" +
+  "若所有子任務都成功，整合產出回答，不要重複貼出每個子任務的原始輸出。";
+
+async function autoContinueOrchestrator(sessionId: string): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  // Atomic claim: another task finishing concurrently must not also fire a run.
+  if (session.status !== "idle") return;
+  session.status = "running";
+  session.streaming = "";
+
+  let systemPrompt = "";
+  try { ({ systemPrompt } = await getSettings()); } catch { /* default */ }
+
+  try {
+    await runClaude(
+      session.id, AUTO_CONTINUE_PROMPT, session.messages,
+      (text) => { session.streaming += text; broadcast(session, { type: "chunk", text }); },
+      systemPrompt,
+      undefined,
+      (text) => { broadcast(session, { type: "thinking", text }); },
+    );
+
+    session.lastRunFinishedAt = Date.now();
+    session.status = "idle";
+    const rawContent = session.streaming;
+
+    // Same DISPATCH parsing as the main chat handler — chained orchestration
+    // is allowed (auto-continue can itself dispatch more tasks).
+    const DISPATCH_RE = /\[DISPATCH:([^\]]+)\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = DISPATCH_RE.exec(rawContent)) !== null) {
+      const inner = m[1];
+      const pipeIdx = inner.indexOf("|");
+      const repoPath = pipeIdx >= 0 ? inner.slice(0, pipeIdx).trim() || undefined : undefined;
+      const prompt   = pipeIdx >= 0 ? inner.slice(pipeIdx + 1).trim() : inner.trim();
+      if (prompt) {
+        const created = createTask({ repoPath, prompt, parentSessionId: session.id });
+        if (!("error" in created)) addPendingDispatch(session.id, created.id);
+        console.log(`[auto-continue] dispatched: "${prompt.slice(0, 60)}" repo=${repoPath ?? "default"}`);
+      }
+    }
+
+    const content = rawContent.replace(/\n?\[DISPATCH:[^\]]+\]/g, "").trimEnd();
+    session.messages.push({ role: "assistant", content, timestamp: Date.now() });
+    session.streaming = "";
+    broadcast(session, { type: "done" });
+    try {
+      dbInsertMessage(session.id, "assistant", content);
+      dbUpsertSession(session.id, { updatedAt: session.lastRunFinishedAt });
+    } catch (e) { console.error("[auto-continue] DB write error:", e); }
+  } catch (err) {
+    session.lastRunFinishedAt = Date.now();
+    session.streaming = "";
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg === "Cancelled") {
+      session.status = "idle";
+      broadcast(session, { type: "cancelled" });
+      return;
+    }
+    session.messages.push({ role: "assistant", content: `Error: ${errMsg}`, timestamp: Date.now() });
+    session.status = "error";
+    broadcast(session, { type: "error", message: errMsg });
+    try { dbInsertMessage(session.id, "assistant", `Error: ${errMsg}`); } catch { /* ignore */ }
+  }
+}
+
+function onTaskFinished(
+  taskId: string,
+  parentSessionId: string,
+  outcome: "done" | "error" | "cancelled",
+): void {
+  injectTaskOutcome(taskId, parentSessionId, outcome);
+  const wasLast = consumePendingDispatch(parentSessionId, taskId);
+  if (wasLast) {
+    // Defer one tick so the inject broadcast / DB write completes before the
+    // next CLI spawn starts reading session.messages.
+    setImmediate(() => { void autoContinueOrchestrator(parentSessionId); });
+  }
+}
+
 taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
-  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "done");
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "done");
 });
 taskEvents.on("task:error", (ev: { taskId: string; parentSessionId?: string }) => {
-  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "error");
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "error");
 });
 taskEvents.on("task:cancelled", (ev: { taskId: string; parentSessionId?: string }) => {
-  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "cancelled");
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "cancelled");
 });
 
 // Pre-load all persisted sessions into the in-memory store so they are

@@ -15,6 +15,7 @@ import {
   type SessionEvent,
 } from "./store.js";
 import { taskEvents, TASK_EVENT_NAMES } from "./task-manager.js";
+import { addPendingDispatch } from "./pending-dispatch.js";
 
 type ClientMsg =
   | { type: "ping" }
@@ -235,7 +236,8 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
                 const repoPath = pipeIdx >= 0 ? inner.slice(0, pipeIdx).trim() || undefined : undefined;
                 const prompt   = pipeIdx >= 0 ? inner.slice(pipeIdx + 1).trim() : inner.trim();
                 if (prompt) {
-                  createTask({ repoPath, prompt, parentSessionId: activeSession.id });
+                  const created = createTask({ repoPath, prompt, parentSessionId: activeSession.id });
+                  if (!("error" in created)) addPendingDispatch(activeSession.id, created.id);
                   console.log(`[ws] auto-dispatch: "${prompt.slice(0, 60)}" repo=${repoPath ?? "default"}`);
                 }
               }
