@@ -19,9 +19,17 @@ loadTasksFromDb();
 
 // When a sub-task finishes with a parentSessionId, inject the result into
 // the parent session as a new assistant message and broadcast to subscribers.
-// Format: a [TASK_RESULT:<taskId>] header on the first line so the UI can
-// render a compact card that links back to the 任務 tab. The body still
-// contains the full result so subsequent AI turns have it in context.
+//
+// Format:
+//   line 1: [TASK_RESULT:<taskId>]               ← UI marker for compact card
+//   line 2: （子任務「<prompt>」（在 <repo>）已完成）  ← AI-readable frame
+//   blank line
+//   rest:   <sub-agent's last assistant reply>   ← AI context for next turn
+//
+// On the next user turn, the main agent reads message.content from history
+// and sees the AI-readable frame + full reply. The opaque [TASK_RESULT:xxx]
+// header is sandwiched between standard chat lines, so even if Claude
+// notices it, the surrounding context is self-explanatory.
 taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
   if (!ev.parentSessionId) return;
   const session = getSession(ev.parentSessionId);
@@ -29,7 +37,16 @@ taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) =>
   const task = getTask(ev.taskId);
   const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
   const summary = lastMsg?.content ?? "（無輸出）";
-  const content = `[TASK_RESULT:${ev.taskId}]\n${summary}`;
+
+  const promptShort = task?.prompt
+    ? (task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + "…" : task.prompt.trim())
+    : "";
+  const repoLabel = task?.repoPath
+    ? (task.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace")
+    : "workspace";
+  const frame = `（子任務「${promptShort}」（在 ${repoLabel}）已完成，以下為其輸出）`;
+  const content = `[TASK_RESULT:${ev.taskId}]\n${frame}\n\n${summary}`;
+
   const msg = { role: "assistant" as const, content, timestamp: Date.now() };
   session.messages.push(msg);
   broadcast(session, { type: "inject", message: msg });

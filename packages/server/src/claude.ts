@@ -99,6 +99,11 @@ function resolveSystemPrompt(userSystemPrompt?: string): string {
   return applyPromptTemplate(raw);
 }
 
+/** Strip the UI-only [TASK_RESULT:<id>] marker line so the AI sees clean content. */
+function stripUiMarkers(content: string): string {
+  return content.replace(/^\[TASK_RESULT:[^\]]+\]\r?\n?/, "");
+}
+
 function buildMessageText(
   userMessage: string,
   systemPrompt: string,
@@ -110,7 +115,7 @@ function buildMessageText(
   if (includeSystemPrompt) parts.push(`[系統指令]\n${systemPrompt}`);
   if (includeHistory && previousMessages.length > 0) {
     const history = previousMessages
-      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${stripUiMarkers(m.content)}`)
       .join("\n\n");
     parts.push(`[Prior conversation]\n${history}`);
   }
