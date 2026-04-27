@@ -19,15 +19,17 @@ loadTasksFromDb();
 
 // When a sub-task finishes with a parentSessionId, inject the result into
 // the parent session as a new assistant message and broadcast to subscribers.
+// Format: a [TASK_RESULT:<taskId>] header on the first line so the UI can
+// render a compact card that links back to the 任務 tab. The body still
+// contains the full result so subsequent AI turns have it in context.
 taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
   if (!ev.parentSessionId) return;
   const session = getSession(ev.parentSessionId);
   if (!session) return;
   const task = getTask(ev.taskId);
   const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
-  const summary = lastMsg?.content?.slice(0, 400) ?? "（無輸出）";
-  const prompt  = task?.prompt.slice(0, 80) ?? "";
-  const content = `📋 **子任務完成**：${prompt}\n\n${summary}`;
+  const summary = lastMsg?.content ?? "（無輸出）";
+  const content = `[TASK_RESULT:${ev.taskId}]\n${summary}`;
   const msg = { role: "assistant" as const, content, timestamp: Date.now() };
   session.messages.push(msg);
   broadcast(session, { type: "inject", message: msg });

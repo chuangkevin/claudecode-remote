@@ -251,6 +251,46 @@ function TaskStatusBadge({ status }: { status: TaskInfo['status'] }) {
   return <span className="text-gray-500 text-xs">⬛</span>
 }
 
+// ── Task-result card (replaces full markdown for inject messages) ────────────
+
+const TASK_RESULT_RE = /^\[TASK_RESULT:([0-9a-fA-F-]+)\][\r\n]+([\s\S]*)$/
+
+function parseTaskResultMessage(content: string): { taskId: string; body: string } | null {
+  const m = TASK_RESULT_RE.exec(content)
+  return m ? { taskId: m[1], body: m[2] } : null
+}
+
+function TaskResultCard({ task, body, onOpen }: { task: TaskInfo | undefined; body: string; onOpen: () => void }) {
+  const repoLabel = task?.repoLabel ?? (task ? repoBasename(task.repoPath) : '未知')
+  const promptPreview = task ? (task.prompt.length > 80 ? task.prompt.slice(0, 80).trim() + '…' : task.prompt) : ''
+  const status = task?.status ?? 'done'
+  const statusLabel: Record<TaskInfo['status'], string> = {
+    running: '進行中',
+    done: '已完成',
+    error: '失敗',
+    cancelled: '已取消',
+  }
+  return (
+    <button
+      onClick={onOpen}
+      className="w-full text-left bg-gray-900/60 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 transition-colors flex items-start gap-2 group"
+      title={task ? '點擊跳到「任務」分頁查看完整輸出' : '對應的任務資料已不存在'}
+    >
+      <span className="mt-0.5">{task ? <TaskStatusBadge status={status} /> : <span className="text-gray-600 text-xs">⬛</span>}</span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-gray-300">📋 子任務 {statusLabel[status]}</span>
+          {task && <><span className="text-gray-500">·</span><code className="text-blue-300 font-mono">{repoLabel}</code></>}
+        </div>
+        {promptPreview && <div className="text-xs text-gray-400 mt-1 break-all line-clamp-1">{promptPreview}</div>}
+        <div className="text-xs text-gray-500 mt-0.5">
+          {body.length} 字輸出 · 點擊看結果 →
+        </div>
+      </div>
+    </button>
+  )
+}
+
 // ── Inline dispatched-task card (shown under assistant message that triggered it) ─
 
 function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }) {
@@ -1008,7 +1048,19 @@ export default function App() {
                   {msg.role === 'assistant' ? (
                     <div className="text-sm">
                       {msg.thinking && <ThinkingBlock thinking={msg.thinking} />}
-                      <MarkdownContent content={msg.content} />
+                      {(() => {
+                        const taskRef = parseTaskResultMessage(msg.content)
+                        if (taskRef) {
+                          return (
+                            <TaskResultCard
+                              task={tasks.find(t => t.id === taskRef.taskId)}
+                              body={taskRef.body}
+                              onOpen={() => setSidebarTab('tasks')}
+                            />
+                          )
+                        }
+                        return <MarkdownContent content={msg.content} />
+                      })()}
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap break-all text-sm">{msg.content}</div>
