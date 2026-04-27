@@ -154,32 +154,70 @@ function ThinkingBlock({ thinking, live }: { thinking: string; live?: boolean })
 
 function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [prompt, setPrompt] = useState('')
+  const [savedPrompt, setSavedPrompt] = useState('')
+  const [defaultPrompt, setDefaultPrompt] = useState('')
+  const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [saved, setSaved] = useState(false)
+  const [showDefault, setShowDefault] = useState(false)
 
   useEffect(() => {
-    fetch('/api/settings').then(r => r.json()).then((d: { systemPrompt: string }) => setPrompt(d.systemPrompt ?? '')).catch(() => {})
+    fetch('/api/settings').then(r => r.json()).then((d: { systemPrompt: string; defaultSystemPrompt: string; workspaceRoot: string }) => {
+      setPrompt(d.systemPrompt ?? '')
+      setSavedPrompt(d.systemPrompt ?? '')
+      setDefaultPrompt(d.defaultSystemPrompt ?? '')
+      setWorkspaceRoot(d.workspaceRoot ?? '')
+    }).catch(() => {})
   }, [])
 
-  const save = async () => {
-    await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ systemPrompt: prompt }) })
+  const persist = async (newPrompt: string) => {
+    await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ systemPrompt: newPrompt }) })
+    setSavedPrompt(newPrompt)
     setSaved(true); setTimeout(() => setSaved(false), 2000)
   }
 
+  const usingDefault = savedPrompt.trim() === ''
+  const dirty = prompt !== savedPrompt
+
   return (
     <div className="bg-gray-800 border-b border-gray-700 px-6 py-4 flex-shrink-0">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-gray-300">System Prompt</span>
-        <button onClick={onClose} className="text-gray-500 hover:text-gray-300">✕</button>
+      <div className="flex items-center justify-between mb-2 gap-4">
+        <div className="flex items-center gap-2 flex-wrap text-sm">
+          <span className="font-medium text-gray-300">System Prompt</span>
+          <span className={`px-2 py-0.5 rounded text-xs ${usingDefault ? 'bg-gray-700 text-gray-400' : 'bg-blue-900 text-blue-200'}`}>
+            {usingDefault ? '使用內建預設' : '使用自訂'}
+          </span>
+          {workspaceRoot && (
+            <span className="text-xs text-gray-500">
+              <code className="bg-gray-900 px-1 py-0.5 rounded">{'{{WORKSPACE_ROOT}}'}</code> = <code className="text-gray-400">{workspaceRoot}</code>
+            </span>
+          )}
+        </div>
+        <button onClick={onClose} className="text-gray-500 hover:text-gray-300 flex-shrink-0">✕</button>
       </div>
       <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
-        placeholder="每次對話自動附加的指令，例如：請先讀 CLAUDE.md"
-        className="w-full resize-none rounded-lg border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        rows={3} />
-      <div className="flex items-center gap-2 mt-2">
-        <button onClick={save} className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500">儲存</button>
-        {saved && <span className="text-sm text-green-400">✓ 已儲存</span>}
+        placeholder={`空白 = 使用內建預設。可用範本變數：{{WORKSPACE_ROOT}}`}
+        className="w-full resize-y rounded-lg border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+        rows={8} />
+      <div className="flex items-center gap-2 mt-2 flex-wrap">
+        <button onClick={() => persist(prompt)} disabled={!dirty}
+          className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed">儲存</button>
+        <button onClick={() => persist('')} disabled={usingDefault && prompt === ''}
+          className="px-4 py-1.5 bg-gray-700 border border-gray-600 text-gray-300 text-sm rounded-lg hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="清除自訂 prompt，回到內建預設">清空（用預設）</button>
+        <button onClick={() => setPrompt(defaultPrompt)}
+          className="px-4 py-1.5 border border-gray-600 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
+          title="把預設值貼進編輯區，方便基於預設修改">載入預設值</button>
+        <button onClick={() => setShowDefault(s => !s)} className="text-xs text-gray-500 hover:text-gray-300 ml-1">
+          {showDefault ? '隱藏' : '檢視'}預設值
+        </button>
+        {saved && <span className="text-sm text-green-400 ml-2">✓ 已儲存</span>}
         <span className="text-xs text-gray-500 ml-auto">下一則訊息起生效</span>
       </div>
+      {showDefault && (
+        <pre className="mt-3 p-3 rounded bg-gray-900 border border-gray-700 text-xs text-gray-400 max-h-64 overflow-auto whitespace-pre-wrap">
+          {defaultPrompt}
+        </pre>
+      )}
     </div>
   )
 }
