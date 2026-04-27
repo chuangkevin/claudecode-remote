@@ -260,7 +260,7 @@ function parseTaskResultMessage(content: string): { taskId: string; body: string
   return m ? { taskId: m[1], body: m[2] } : null
 }
 
-function TaskResultCard({ task, body, onOpen }: { task: TaskInfo | undefined; body: string; onOpen: () => void }) {
+function TaskResultCard({ task, body }: { task: TaskInfo | undefined; body: string }) {
   const repoLabel = task?.repoLabel ?? (task ? repoBasename(task.repoPath) : '未知')
   const promptPreview = task ? (task.prompt.length > 80 ? task.prompt.slice(0, 80).trim() + '…' : task.prompt) : ''
   const status = task?.status ?? 'done'
@@ -271,11 +271,8 @@ function TaskResultCard({ task, body, onOpen }: { task: TaskInfo | undefined; bo
     cancelled: '已取消',
   }
   return (
-    <button
-      onClick={onOpen}
-      className="w-full text-left bg-gray-900/60 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 transition-colors flex items-start gap-2 group"
-      title={task ? '點擊跳到「任務」分頁查看完整輸出' : '對應的任務資料已不存在'}
-    >
+    <div className="bg-gray-900/60 border border-gray-700 rounded-lg px-3 py-2 flex items-start gap-2"
+         title={task ? '完整輸出可在「任務」分頁查看' : '對應的任務資料已不存在'}>
       <span className="mt-0.5">{task ? <TaskStatusBadge status={status} /> : <span className="text-gray-600 text-xs">⬛</span>}</span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 text-xs">
@@ -283,11 +280,9 @@ function TaskResultCard({ task, body, onOpen }: { task: TaskInfo | undefined; bo
           {task && <><span className="text-gray-500">·</span><code className="text-blue-300 font-mono">{repoLabel}</code></>}
         </div>
         {promptPreview && <div className="text-xs text-gray-400 mt-1 break-all line-clamp-1">{promptPreview}</div>}
-        <div className="text-xs text-gray-500 mt-0.5">
-          {body.length} 字輸出 · 點擊看結果 →
-        </div>
+        <div className="text-xs text-gray-500 mt-0.5">{body.length} 字輸出</div>
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -300,7 +295,7 @@ function extractTaskError(task: TaskInfo): string | null {
   return last.content.startsWith('Error: ') ? last.content.slice(7) : last.content
 }
 
-function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }) {
+function InlineTaskCard({ task }: { task: TaskInfo }) {
   const repoLabel = task.repoLabel ?? repoBasename(task.repoPath)
   const promptPreview = task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + '…' : task.prompt
   const statusLabel: Record<TaskInfo['status'], string> = {
@@ -311,11 +306,8 @@ function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }
   }
   const errorMsg = extractTaskError(task)
   return (
-    <button
-      onClick={onOpen}
-      className="w-full text-left bg-gray-900/60 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 transition-colors flex items-start gap-2 group"
-      title={errorMsg ? `失敗原因：${errorMsg}` : '點擊跳到「任務」分頁查看完整輸出'}
-    >
+    <div className="bg-gray-900/60 border border-gray-700 rounded-lg px-3 py-2 flex items-start gap-2"
+         title={errorMsg ? `失敗原因：${errorMsg}` : '完整輸出可在「任務」分頁查看'}>
       <span className="mt-0.5"><TaskStatusBadge status={task.status} /></span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 text-xs">
@@ -329,8 +321,7 @@ function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }
           <div className="text-xs text-red-400 mt-1 break-all line-clamp-2">⚠ {errorMsg}</div>
         )}
       </div>
-      <span className="text-gray-600 text-xs opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">查看 →</span>
-    </button>
+    </div>
   )
 }
 
@@ -1066,7 +1057,6 @@ export default function App() {
                             <TaskResultCard
                               task={tasks.find(t => t.id === taskRef.taskId)}
                               body={taskRef.body}
-                              onOpen={() => setSidebarTab('tasks')}
                             />
                           )
                         }
@@ -1079,7 +1069,7 @@ export default function App() {
                   {msg.role === 'assistant' && tasksByMessageIndex.get(idx) && (
                     <div className="mt-2 space-y-1.5">
                       {tasksByMessageIndex.get(idx)!.map(t => (
-                        <InlineTaskCard key={t.id} task={t} onOpen={() => setSidebarTab('tasks')} />
+                        <InlineTaskCard key={t.id} task={t} />
                       ))}
                     </div>
                   )}
