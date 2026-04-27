@@ -44,7 +44,11 @@ const pool = new Map<string, ManagedProcess>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrator）。你完全不自己做事，你只派遣子任務並整合回報。
+// ── Default system prompt (Pure Dispatch Orchestrator) ───────────────────────
+// Path values are templated as {{WORKSPACE_ROOT}} and substituted at runtime
+// against config.workspaceRoot, so no machine-specific paths are baked in.
+// User overrides (stored in DB) may also use {{WORKSPACE_ROOT}}.
+export const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrator）。你完全不自己做事，你只派遣子任務並整合回報。
 
 ## 核心原則：絕對純派遣模式
 
@@ -65,6 +69,12 @@ const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrato
 - ✅ 純文字對話（打招呼、確認需求、解釋計畫）
 - ✅ 把已收到的子任務回報整合成摘要回覆使用者
 - ✅ 規劃要派遣哪些子任務
+
+### 什麼時候派遣（幾乎所有事）
+- 讀檔案、搜尋程式碼 → 派遣
+- 跑命令、查狀態 → 派遣
+- 寫/改程式碼、bug 修復 → 派遣
+- 任何需要工具的事 → 派遣
 
 **鐵律**：只要使用者的訊息需要任何「動作」（不只是聊天），第一反應就是派遣，不要自己動手。
 不確定要不要派遣？→ 派遣。
@@ -91,12 +101,14 @@ const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrato
 格式（預設 workspace）：[DISPATCH:任務描述]
 
 範例：
-[DISPATCH:D:\\GitClone\\_HomeProject\\other-repo|重構 auth.ts 的錯誤處理]
+[DISPATCH:{{WORKSPACE_ROOT}}\\other-repo|重構 auth.ts 的錯誤處理]
 [DISPATCH:讀取 CLAUDE.md 並回報摘要]
+
+預設工作目錄：{{WORKSPACE_ROOT}}
 
 規則：
 - DISPATCH 指令放在回應的最後段落，每個一行
-- repoPath 用 | 與任務描述分隔；省略則用預設工作目錄
+- repoPath 用 | 與任務描述分隔；省略則用預設工作目錄（{{WORKSPACE_ROOT}}）
 - 子任務描述要完整、可獨立執行（子 agent 看不到這個對話的歷史）
 - 子任務完成後結果會自動回報到這個對話，你再整合給使用者
 - 多個獨立子任務可同時派遣並行執行
@@ -123,8 +135,19 @@ const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrato
 - ❌ 在主對話裡貼大段程式碼或檔案內容（會吃光 context）
 - ❌ 動使用者帳號資料（除非明確要求）`;
 
+/** Replace {{WORKSPACE_ROOT}} in the prompt with the configured workspace path. */
+export function applyPromptTemplate(prompt: string): string {
+  return prompt.replaceAll("{{WORKSPACE_ROOT}}", config.workspaceRoot);
+}
+
 function resolveSystemPrompt(userSystemPrompt?: string): string {
-  return userSystemPrompt?.trim() ? userSystemPrompt.trim() : DEFAULT_SYSTEM_PROMPT;
+  const raw = userSystemPrompt?.trim() ? userSystemPrompt.trim() : DEFAULT_SYSTEM_PROMPT;
+  return applyPromptTemplate(raw);
+}
+
+/** Strip the UI-only [TASK_RESULT:<id>] marker line so the AI sees clean content. */
+function stripUiMarkers(content: string): string {
+  return content.replace(/^\[TASK_RESULT:[^\]]+\]\r?\n?/, "");
 }
 
 function buildMessageText(
@@ -138,7 +161,7 @@ function buildMessageText(
   if (includeSystemPrompt) parts.push(`[系統指令]\n${systemPrompt}`);
   if (includeHistory && previousMessages.length > 0) {
     const history = previousMessages
-      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+      .map(m => `${m.role === "user" ? "User" : "Assistant"}: ${stripUiMarkers(m.content)}`)
       .join("\n\n");
     parts.push(`[Prior conversation]\n${history}`);
   }

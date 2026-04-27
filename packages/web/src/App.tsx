@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -19,6 +19,7 @@ interface PendingImage {
   id?: string
   uploading: boolean
   error?: boolean
+  errorMessage?: string
 }
 
 interface DiskSession {
@@ -47,6 +48,7 @@ interface TaskInfo {
   streaming: string
   createdAt: number
   updatedAt: number
+  parentSessionId?: string
 }
 
 interface Toast {
@@ -98,6 +100,15 @@ function relativeTime(ms: number): string {
 
 function repoBasename(p: string): string {
   return p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? p
+}
+
+// Strip [DISPATCH:repoPath|prompt] tags before markdown rendering. Server now
+// keeps these in stored content so the main agent's history shows them — but
+// for users they're noise, and worse, they corrupt markdown structure (tables,
+// code blocks) when the AI inlines them mid-format. Removed on display only.
+const DISPATCH_DISPLAY_RE = /\n?\[DISPATCH:[^\]]+\]/g
+function stripDispatchTagsForDisplay(s: string): string {
+  return s.replace(DISPATCH_DISPLAY_RE, "")
 }
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
@@ -154,32 +165,70 @@ function ThinkingBlock({ thinking, live }: { thinking: string; live?: boolean })
 
 function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [prompt, setPrompt] = useState('')
+  const [savedPrompt, setSavedPrompt] = useState('')
+  const [defaultPrompt, setDefaultPrompt] = useState('')
+  const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [saved, setSaved] = useState(false)
+  const [showDefault, setShowDefault] = useState(false)
 
   useEffect(() => {
-    fetch('/api/settings').then(r => r.json()).then((d: { systemPrompt: string }) => setPrompt(d.systemPrompt ?? '')).catch(() => {})
+    fetch('/api/settings').then(r => r.json()).then((d: { systemPrompt: string; defaultSystemPrompt: string; workspaceRoot: string }) => {
+      setPrompt(d.systemPrompt ?? '')
+      setSavedPrompt(d.systemPrompt ?? '')
+      setDefaultPrompt(d.defaultSystemPrompt ?? '')
+      setWorkspaceRoot(d.workspaceRoot ?? '')
+    }).catch(() => {})
   }, [])
 
-  const save = async () => {
-    await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ systemPrompt: prompt }) })
+  const persist = async (newPrompt: string) => {
+    await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ systemPrompt: newPrompt }) })
+    setSavedPrompt(newPrompt)
     setSaved(true); setTimeout(() => setSaved(false), 2000)
   }
 
+  const usingDefault = savedPrompt.trim() === ''
+  const dirty = prompt !== savedPrompt
+
   return (
     <div className="bg-gray-800 border-b border-gray-700 px-6 py-4 flex-shrink-0">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-gray-300">System Prompt</span>
-        <button onClick={onClose} className="text-gray-500 hover:text-gray-300">✕</button>
+      <div className="flex items-center justify-between mb-2 gap-4">
+        <div className="flex items-center gap-2 flex-wrap text-sm">
+          <span className="font-medium text-gray-300">System Prompt</span>
+          <span className={`px-2 py-0.5 rounded text-xs ${usingDefault ? 'bg-gray-700 text-gray-400' : 'bg-blue-900 text-blue-200'}`}>
+            {usingDefault ? '使用內建預設' : '使用自訂'}
+          </span>
+          {workspaceRoot && (
+            <span className="text-xs text-gray-500">
+              <code className="bg-gray-900 px-1 py-0.5 rounded">{'{{WORKSPACE_ROOT}}'}</code> = <code className="text-gray-400">{workspaceRoot}</code>
+            </span>
+          )}
+        </div>
+        <button onClick={onClose} className="text-gray-500 hover:text-gray-300 flex-shrink-0">✕</button>
       </div>
       <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
-        placeholder="每次對話自動附加的指令，例如：請先讀 CLAUDE.md"
-        className="w-full resize-none rounded-lg border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-        rows={3} />
-      <div className="flex items-center gap-2 mt-2">
-        <button onClick={save} className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500">儲存</button>
-        {saved && <span className="text-sm text-green-400">✓ 已儲存</span>}
+        placeholder={`空白 = 使用內建預設。可用範本變數：{{WORKSPACE_ROOT}}`}
+        className="w-full resize-y rounded-lg border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+        rows={8} />
+      <div className="flex items-center gap-2 mt-2 flex-wrap">
+        <button onClick={() => persist(prompt)} disabled={!dirty}
+          className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed">儲存</button>
+        <button onClick={() => persist('')} disabled={usingDefault && prompt === ''}
+          className="px-4 py-1.5 bg-gray-700 border border-gray-600 text-gray-300 text-sm rounded-lg hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="清除自訂 prompt，回到內建預設">清空（用預設）</button>
+        <button onClick={() => setPrompt(defaultPrompt)}
+          className="px-4 py-1.5 border border-gray-600 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
+          title="把預設值貼進編輯區，方便基於預設修改">載入預設值</button>
+        <button onClick={() => setShowDefault(s => !s)} className="text-xs text-gray-500 hover:text-gray-300 ml-1">
+          {showDefault ? '隱藏' : '檢視'}預設值
+        </button>
+        {saved && <span className="text-sm text-green-400 ml-2">✓ 已儲存</span>}
         <span className="text-xs text-gray-500 ml-auto">下一則訊息起生效</span>
       </div>
+      {showDefault && (
+        <pre className="mt-3 p-3 rounded bg-gray-900 border border-gray-700 text-xs text-gray-400 max-h-64 overflow-auto whitespace-pre-wrap">
+          {defaultPrompt}
+        </pre>
+      )}
     </div>
   )
 }
@@ -211,6 +260,80 @@ function TaskStatusBadge({ status }: { status: TaskInfo['status'] }) {
   return <span className="text-gray-500 text-xs">⬛</span>
 }
 
+// ── Task-result card (replaces full markdown for inject messages) ────────────
+
+const TASK_RESULT_RE = /^\[TASK_RESULT:([0-9a-fA-F-]+)\][\r\n]+([\s\S]*)$/
+
+function parseTaskResultMessage(content: string): { taskId: string; body: string } | null {
+  const m = TASK_RESULT_RE.exec(content)
+  return m ? { taskId: m[1], body: m[2] } : null
+}
+
+function TaskResultCard({ task, body }: { task: TaskInfo | undefined; body: string }) {
+  const repoLabel = task?.repoLabel ?? (task ? repoBasename(task.repoPath) : '未知')
+  const promptPreview = task ? (task.prompt.length > 80 ? task.prompt.slice(0, 80).trim() + '…' : task.prompt) : ''
+  const status = task?.status ?? 'done'
+  const statusLabel: Record<TaskInfo['status'], string> = {
+    running: '進行中',
+    done: '已完成',
+    error: '失敗',
+    cancelled: '已取消',
+  }
+  return (
+    <div className="bg-gray-900/60 border border-gray-700 rounded-lg px-3 py-2 flex items-start gap-2"
+         title={task ? '完整輸出可在「任務」分頁查看' : '對應的任務資料已不存在'}>
+      <span className="mt-0.5">{task ? <TaskStatusBadge status={status} /> : <span className="text-gray-600 text-xs">⬛</span>}</span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-gray-300">📋 子任務 {statusLabel[status]}</span>
+          {task && <><span className="text-gray-500">·</span><code className="text-blue-300 font-mono">{repoLabel}</code></>}
+        </div>
+        {promptPreview && <div className="text-xs text-gray-400 mt-1 break-all line-clamp-1">{promptPreview}</div>}
+        <div className="text-xs text-gray-500 mt-0.5">{body.length} 字輸出</div>
+      </div>
+    </div>
+  )
+}
+
+// ── Inline dispatched-task card (shown under assistant message that triggered it) ─
+
+function extractTaskError(task: TaskInfo): string | null {
+  if (task.status !== 'error') return null
+  const last = task.messages.slice().reverse().find(m => m.role === 'assistant')
+  if (!last) return null
+  return last.content.startsWith('Error: ') ? last.content.slice(7) : last.content
+}
+
+function InlineTaskCard({ task }: { task: TaskInfo }) {
+  const repoLabel = task.repoLabel ?? repoBasename(task.repoPath)
+  const promptPreview = task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + '…' : task.prompt
+  const statusLabel: Record<TaskInfo['status'], string> = {
+    running: '進行中',
+    done: '已完成',
+    error: '失敗',
+    cancelled: '已取消',
+  }
+  const errorMsg = extractTaskError(task)
+  return (
+    <div className="bg-gray-900/60 border border-gray-700 rounded-lg px-3 py-2 flex items-start gap-2"
+         title={errorMsg ? `失敗原因：${errorMsg}` : '完整輸出可在「任務」分頁查看'}>
+      <span className="mt-0.5"><TaskStatusBadge status={task.status} /></span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 text-xs">
+          <span className="text-gray-300">→ 派遣到</span>
+          <code className="text-blue-300 font-mono">{repoLabel}</code>
+          <span className="text-gray-500">·</span>
+          <span className={task.status === 'error' ? 'text-red-400' : 'text-gray-500'}>{statusLabel[task.status]}</span>
+        </div>
+        <div className="text-xs text-gray-400 mt-1 break-all whitespace-pre-wrap line-clamp-2">{promptPreview}</div>
+        {errorMsg && (
+          <div className="text-xs text-red-400 mt-1 break-all line-clamp-2">⚠ {errorMsg}</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Tasks panel ───────────────────────────────────────────────────────────────
 
 function TasksPanel({ tasks, onCancel, onDelete }: {
@@ -220,13 +343,17 @@ function TasksPanel({ tasks, onCancel, onDelete }: {
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
+  // Sidebar layout: tab bar (flex-shrink-0) + this panel. Use flex-1 + min-h-0
+  // so this fills the remaining height AND allows the inner scroll container
+  // to shrink. h-full would refuse to shrink below content height, pushing
+  // the tab bar out the top of the viewport.
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3 pt-4 pb-2">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="px-3 pt-4 pb-2 flex-shrink-0">
         <p className="text-xs text-gray-600 px-1">任務由 AI 自動派工</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="flex-1 min-h-0 overflow-y-auto py-1">
         {tasks.length === 0 && (
           <div className="px-4 py-8 text-center text-gray-600 text-xs">尚無任務</div>
         )}
@@ -375,7 +502,7 @@ function Sidebar({
       {/* Tab content */}
       {tab === 'chat' ? (
         <>
-          <div className="px-3 pt-3 pb-2 flex items-center gap-2">
+          <div className="px-3 pt-3 pb-2 flex items-center gap-2 flex-shrink-0">
             <button onClick={onNew}
               className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium transition-colors">
               <span className="text-lg leading-none">+</span> 新對話
@@ -383,7 +510,7 @@ function Sidebar({
             <button onClick={onRefresh} title="重新整理" className="p-2 text-gray-500 hover:text-gray-300 rounded-lg hover:bg-gray-800">↻</button>
           </div>
 
-          <div className="flex-1 overflow-y-auto py-1">
+          <div className="flex-1 min-h-0 overflow-y-auto py-1">
             {sessions.length === 0 && (
               <div className="px-4 py-8 text-center text-gray-600 text-xs">尚無對話記錄</div>
             )}
@@ -447,6 +574,8 @@ function Sidebar({
 
 // ── Main App ──────────────────────────────────────────────────────────────────
 
+const INPUT_HEIGHT_KEY = 'claudecode-remote:input-height'
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -458,6 +587,14 @@ export default function App() {
   const [sessions, setSessions] = useState<DiskSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [inputHeight] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null
+    const raw = localStorage.getItem(INPUT_HEIGHT_KEY)
+    if (!raw) return null
+    const n = parseInt(raw, 10)
+    return !Number.isNaN(n) && n >= 40 && n <= 800 ? n : null
+  })
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chat')
   const [longWait, setLongWait] = useState(false)
   const [currentThinking, setCurrentThinking] = useState('')
@@ -478,6 +615,44 @@ export default function App() {
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
+
+  // Map each assistant message index → tasks dispatched from it.
+  // Server timeline on done: createTask() runs FIRST, then the assistant
+  // message is pushed (with timestamp = now). So task.createdAt is always
+  // BEFORE the parent assistant message's timestamp. The correct range for
+  // an assistant message is therefore (prev message ts, this message ts].
+  const tasksByMessageIndex = useMemo(() => {
+    const map = new Map<number, TaskInfo[]>()
+    if (!activeSessionId) return map
+    const sessionTasks = tasks.filter(t => t.parentSessionId === activeSessionId)
+    if (sessionTasks.length === 0) return map
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role !== 'assistant') continue
+      const start = i > 0 ? messages[i - 1].timestamp : 0
+      const end = messages[i].timestamp
+      const matched = sessionTasks
+        .filter(t => t.createdAt > start && t.createdAt <= end)
+        .sort((a, b) => a.createdAt - b.createdAt)
+      if (matched.length > 0) map.set(i, matched)
+    }
+    return map
+  }, [messages, tasks, activeSessionId])
+
+  // Persist textarea height across sessions (per-browser).
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    const saved = localStorage.getItem(INPUT_HEIGHT_KEY)
+    let lastSaved = saved ? parseInt(saved, 10) : el.offsetHeight
+    const observer = new ResizeObserver(() => {
+      const h = el.offsetHeight
+      if (h <= 0 || Math.abs(h - lastSaved) < 1) return
+      lastSaved = h
+      try { localStorage.setItem(INPUT_HEIGHT_KEY, String(h)) } catch { /* quota */ }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (!isProcessing) { setLongWait(false); return }
@@ -761,12 +936,19 @@ export default function App() {
         .then(({ aiBase64, thumbnail }) =>
           fetch('/api/upload-image', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ base64: aiBase64, mediaType: 'image/jpeg', thumbnail }) }).then(async r => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`)
+            if (!r.ok) {
+              const body = await r.text().catch(() => '')
+              throw new Error(`HTTP ${r.status}${body ? `: ${body.slice(0, 200)}` : ''}`)
+            }
             const { id } = await r.json() as { id: string }
             setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, thumbnail, id, uploading: false } : p))
           })
         )
-        .catch(() => { setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, uploading: false, error: true } : p)) })
+        .catch((err: Error) => {
+          const msg = err?.message ?? String(err)
+          console.error('[upload-image]', file.name, msg, err)
+          setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, uploading: false, error: true, errorMessage: msg } : p))
+        })
     })
   }
 
@@ -881,10 +1063,28 @@ export default function App() {
                   {msg.role === 'assistant' ? (
                     <div className="text-sm">
                       {msg.thinking && <ThinkingBlock thinking={msg.thinking} />}
-                      <MarkdownContent content={msg.content} />
+                      {(() => {
+                        const taskRef = parseTaskResultMessage(msg.content)
+                        if (taskRef) {
+                          return (
+                            <TaskResultCard
+                              task={tasks.find(t => t.id === taskRef.taskId)}
+                              body={taskRef.body}
+                            />
+                          )
+                        }
+                        return <MarkdownContent content={stripDispatchTagsForDisplay(msg.content)} />
+                      })()}
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap break-all text-sm">{msg.content}</div>
+                  )}
+                  {msg.role === 'assistant' && tasksByMessageIndex.get(idx) && (
+                    <div className="mt-2 space-y-1.5">
+                      {tasksByMessageIndex.get(idx)!.map(t => (
+                        <InlineTaskCard key={t.id} task={t} />
+                      ))}
+                    </div>
                   )}
                   <div className={`text-xs mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-500'}`}>
                     {new Date(msg.timestamp).toLocaleTimeString('zh-TW')}
@@ -898,7 +1098,7 @@ export default function App() {
                 <div className="max-w-[80%] rounded-xl px-4 py-2.5 bg-gray-800 border border-gray-700 text-gray-100">
                   <div className="text-sm">
                     {currentThinking && <ThinkingBlock thinking={currentThinking} live />}
-                    {currentResponse && <MarkdownContent content={currentResponse} />}
+                    {currentResponse && <MarkdownContent content={stripDispatchTagsForDisplay(currentResponse)} />}
                   </div>
                 </div>
               </div>
@@ -942,7 +1142,8 @@ export default function App() {
                     </div>
                   )}
                   {!p.uploading && p.error && (
-                    <div className="absolute inset-0 bg-red-900/70 rounded-lg flex items-center justify-center" title="上傳失敗">
+                    <div className="absolute inset-0 bg-red-900/70 rounded-lg flex items-center justify-center"
+                         title={p.errorMessage ? `上傳失敗：${p.errorMessage}` : '上傳失敗'}>
                       <span className="text-white text-lg font-bold">!</span>
                     </div>
                   )}
@@ -997,9 +1198,10 @@ export default function App() {
             </button>
             <input ref={fileInputRef} type="file" accept={ACCEPTED} multiple className="hidden" onChange={onImagePick} />
 
-            <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
+            <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
               placeholder={isProcessing ? '輸入訊息… (Enter 排隊，Shift+Enter 換行)' : '輸入訊息… (Enter 傳送，Shift+Enter 換行)'}
-              className="flex-1 resize-none rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+              className="flex-1 resize-y min-h-[60px] max-h-[60vh] rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
+              style={inputHeight ? { height: `${inputHeight}px` } : undefined}
               rows={2} disabled={!isConnected} data-processing={isProcessing} />
 
             {isProcessing && !input.trim() ? (
