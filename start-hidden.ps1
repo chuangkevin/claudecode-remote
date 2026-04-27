@@ -14,10 +14,20 @@ if ($existing) {
     Start-Sleep -Seconds 1
 }
 
-# Add a startup marker so log boundaries are visible across restarts
+# Add a startup marker so log boundaries are visible across restarts.
+# Retry briefly because the previous cmd.exe may still hold the file handle
+# while flushing — race window is short, a couple of retries is enough.
 $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $serverLog = Join-Path $PSScriptRoot "server.log"
-Add-Content -Path $serverLog -Value "`r`n=== $ts [start-hidden] starting node ==="
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        Add-Content -Path $serverLog -Value "`r`n=== $ts [start-hidden] starting node ===" -ErrorAction Stop
+        break
+    } catch {
+        if ($attempt -eq 5) { Write-Host "  !! could not write log header: $_" -ForegroundColor DarkYellow }
+        else { Start-Sleep -Milliseconds 200 }
+    }
+}
 
 # Spawn via cmd /c so we can append stdout+stderr to server.log in one shot.
 # (Start-Process -RedirectStandardOutput is overwrite-only; cmd's >> is append.)
