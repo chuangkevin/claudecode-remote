@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { config } from "./config.js";
@@ -59,6 +59,36 @@ function isGitRepo(path: string): boolean {
     execSync(`git -C "${path}" rev-parse --git-dir`, { stdio: "pipe", timeout: 5_000 });
     return true;
   } catch { return false; }
+}
+
+const SKIP_DIR_NAMES = new Set(["node_modules", ".git", ".worktrees", "dist", "build", ".next", ".cache", ".vscode", ".idea"]);
+
+/**
+ * Search for directories named `target` under `root`, breadth-first up to maxDepth levels.
+ * Skips noisy directories (node_modules, .git, etc.) so a typical workspace scan
+ * stays under ~50ms.
+ */
+function findDirsByBasename(root: string, target: string, maxDepth = 4): string[] {
+  const matches: string[] = [];
+  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift()!;
+    if (depth >= maxDepth) continue;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (SKIP_DIR_NAMES.has(e.name)) continue;
+      const full = join(dir, e.name);
+      if (e.name === target) matches.push(full);
+      queue.push({ dir: full, depth: depth + 1 });
+    }
+  }
+  return matches;
 }
 
 function tryCreateWorktree(repoPath: string, wtPath: string, branch: string): boolean {
@@ -140,12 +170,30 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     return { error: `已達最大並行上限 (${MAX_CONCURRENT})` };
   }
 
-  const repoPath = params.repoPath?.trim() || config.workspaceRoot;
-  // Validate the path early. If bad, we still record the task (so it shows
-  // up in the UI with a clear failure reason) but skip the spawn step —
-  // child_process.spawn would otherwise throw a misleading
-  // "spawn cmd.exe ENOENT" when its cwd doesn't exist.
-  const dirOk = existsSync(repoPath) && statSync(repoPath).isDirectory();
+  let repoPath = params.repoPath?.trim() || config.workspaceRoot;
+  let resolutionNote: string | null = null;
+
+  // If the path doesn't exist as-is, try to resolve it: take the basename
+  // (e.g. "sheet-to-car") and look for a directory by that name anywhere
+  // under WORKSPACE_ROOT. The main agent often guesses paths like
+  // "${WORKSPACE_ROOT}/<name>" without knowing the repo is actually nested
+  // (e.g. inside _car-maintain). Auto-correcting saves a failed dispatch
+  // and a follow-up retry.
+  let dirOk = existsSync(repoPath) && statSync(repoPath).isDirectory();
+  if (!dirOk) {
+    const target = basename(repoPath);
+    if (target && target !== repoPath) {  // skip if input was just a bare basename — search would loop on itself
+      const matches = findDirsByBasename(config.workspaceRoot, target);
+      if (matches.length === 1) {
+        resolutionNote = `路徑解析：${repoPath} → ${matches[0]}`;
+        repoPath = matches[0];
+        dirOk = true;
+        console.log(`[task] ${resolutionNote}`);
+      } else if (matches.length > 1) {
+        resolutionNote = `路徑「${target}」在 workspace 下有多個候選，請指定完整路徑：${matches.join(" / ")}`;
+      }
+    }
+  }
   const isRepo = dirOk && isGitRepo(repoPath);
   const taskId = randomUUID();
   const slug = sanitizeBranch(params.prompt.slice(0, 20));
@@ -217,7 +265,10 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
   // Bail out cleanly if the path was bad — the task is now visible in the
   // UI with a clear failure reason instead of the cryptic ENOENT spawn error.
   if (!dirOk) {
-    finishTask(task, "error", `目錄不存在或不是資料夾：${repoPath}`);
+    const reason = resolutionNote
+      ? resolutionNote  // tells AI exactly which candidates exist, so retry is straightforward
+      : `目錄不存在或不是資料夾：${repoPath}（在 workspace ${config.workspaceRoot} 下也找不到同名目錄）`;
+    finishTask(task, "error", reason);
     return toInfo(task);
   }
 

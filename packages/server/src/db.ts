@@ -153,6 +153,13 @@ export function dbLoadMessages(sessionId: string): DbMessage[] {
     .all(sessionId) as DbMessage[];
 }
 
+/** Drop every message in this session whose created_at > the given timestamp. */
+export function dbDeleteMessagesAfter(sessionId: string, timestampExclusive: number): void {
+  db()
+    .prepare(`DELETE FROM messages WHERE session_id = ? AND created_at > ?`)
+    .run(sessionId, timestampExclusive);
+}
+
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 export function dbGetSetting(key: string): string | null {
