@@ -102,6 +102,15 @@ function repoBasename(p: string): string {
   return p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? p
 }
 
+// Strip [DISPATCH:repoPath|prompt] tags before markdown rendering. Server now
+// keeps these in stored content so the main agent's history shows them — but
+// for users they're noise, and worse, they corrupt markdown structure (tables,
+// code blocks) when the AI inlines them mid-format. Removed on display only.
+const DISPATCH_DISPLAY_RE = /\n?\[DISPATCH:[^\]]+\]/g
+function stripDispatchTagsForDisplay(s: string): string {
+  return s.replace(DISPATCH_DISPLAY_RE, "")
+}
+
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
 function MarkdownContent({ content }: { content: string }) {
@@ -1060,7 +1069,7 @@ export default function App() {
                             />
                           )
                         }
-                        return <MarkdownContent content={msg.content} />
+                        return <MarkdownContent content={stripDispatchTagsForDisplay(msg.content)} />
                       })()}
                     </div>
                   ) : (
@@ -1085,7 +1094,7 @@ export default function App() {
                 <div className="max-w-[80%] rounded-xl px-4 py-2.5 bg-gray-800 border border-gray-700 text-gray-100">
                   <div className="text-sm">
                     {currentThinking && <ThinkingBlock thinking={currentThinking} live />}
-                    {currentResponse && <MarkdownContent content={currentResponse} />}
+                    {currentResponse && <MarkdownContent content={stripDispatchTagsForDisplay(currentResponse)} />}
                   </div>
                 </div>
               </div>

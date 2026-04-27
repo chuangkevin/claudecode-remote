@@ -242,8 +242,12 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
                 }
               }
 
-              // Strip DISPATCH tags from stored content so history is clean
-              const content = rawContent.replace(/\n?\[DISPATCH:[^\]]+\]/g, "").trimEnd();
+              // Keep DISPATCH tags in the stored content. Stripping them server-side
+              // hides past dispatches from the main agent on later turns — it sees its
+              // own previous reply as a tag-free narrative ("我派遣了兩個任務") and
+              // mimics that on the next turn, *describing* dispatch without emitting
+              // [DISPATCH:...] tags. UI strips for display in App.tsx; AI sees raw.
+              const content = rawContent.trimEnd();
 
               activeSession.messages.push({ role: "assistant", content, timestamp: Date.now() });
               activeSession.streaming = "";
