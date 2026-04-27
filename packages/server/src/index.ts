@@ -10,8 +10,8 @@ import { loadSession, getSession, broadcast } from "./store.js";
 import type { StoredMessage } from "./store.js";
 import { storeImage } from "./image-store.js";
 import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb, taskEvents } from "./task-manager.js";
-import { runClaude } from "./claude.js";
-import { addPendingDispatch, consumePendingDispatch } from "./pending-dispatch.js";
+import { runClaude, killSession } from "./claude.js";
+import { consumePendingDispatch, hasPendingDispatch } from "./pending-dispatch.js";
 
 // ── DB init + startup load ────────────────────────────────────────────────────
 
@@ -79,13 +79,17 @@ function injectTaskOutcome(
 // run of the main agent with a synthetic prompt to integrate the results.
 
 const AUTO_CONTINUE_PROMPT =
-  "所有先前派遣的子任務都已結束。請依據上方各 [TASK_RESULT:...] 標記後的內容，整合結果並向使用者回應原本的問題。" +
-  "若有失敗的子任務，請告訴使用者失敗原因，並建議下一步該怎麼處理（例如：是否重新派遣、是否需要使用者補資訊）。" +
-  "若所有子任務都成功，整合產出回答，不要重複貼出每個子任務的原始輸出。";
+  "上方對話中，每一則開頭為「（子任務「...」」的 Assistant 訊息，都是先前派遣的子任務回傳的結果（成功或失敗）。" +
+  "請根據這些結果整合並回應使用者最原本的問題：成功的子任務輸出整合成完整回答；失敗的子任務告訴使用者哪裡失敗、為什麼，以及建議下一步。" +
+  "請勿產生新的 [DISPATCH:...] 標籤，直接整合回答即可。";
 
 async function autoContinueOrchestrator(sessionId: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session) return;
+  // Re-check: more sibling tasks may have been dispatched (or even queued
+  // up another fast-fail) between the consumePendingDispatch that scheduled
+  // this run and setImmediate firing it.
+  if (hasPendingDispatch(sessionId)) return;
   // Atomic claim: another task finishing concurrently must not also fire a run.
   if (session.status !== "idle") return;
   session.status = "running";
@@ -93,6 +97,14 @@ async function autoContinueOrchestrator(sessionId: string): Promise<void> {
 
   let systemPrompt = "";
   try { ({ systemPrompt } = await getSettings()); } catch { /* default */ }
+
+  // The persistent Claude CLI process for this session has its own internal
+  // conversation memory. The inject messages we pushed into session.messages
+  // were never sent to it (runClaude only re-feeds full history on first
+  // message of a freshly spawned process). Kill the CLI so the next runClaude
+  // call respawns and replays the full session.messages — including the
+  // [TASK_RESULT:...] injects that contain the sub-agent outputs.
+  killSession(session.id);
 
   try {
     await runClaude(
@@ -107,22 +119,20 @@ async function autoContinueOrchestrator(sessionId: string): Promise<void> {
     session.status = "idle";
     const rawContent = session.streaming;
 
-    // Same DISPATCH parsing as the main chat handler — chained orchestration
-    // is allowed (auto-continue can itself dispatch more tasks).
+    // Auto-continue is the INTEGRATION phase — it must not start a new round
+    // of orchestration. The synthetic prompt explicitly tells the AI not to
+    // produce more [DISPATCH:...] tags, but the system prompt's "派遣 99%"
+    // tendency sometimes wins anyway (often as placeholder `[DISPATCH:...]`
+    // with literal `...` content). We log and ignore any DISPATCH tags here
+    // to prevent the orchestrator from looping back into itself.
     const DISPATCH_RE = /\[DISPATCH:([^\]]+)\]/g;
     let m: RegExpExecArray | null;
     while ((m = DISPATCH_RE.exec(rawContent)) !== null) {
       const inner = m[1];
-      const pipeIdx = inner.indexOf("|");
-      const repoPath = pipeIdx >= 0 ? inner.slice(0, pipeIdx).trim() || undefined : undefined;
-      const prompt   = pipeIdx >= 0 ? inner.slice(pipeIdx + 1).trim() : inner.trim();
-      if (prompt) {
-        const created = createTask({ repoPath, prompt, parentSessionId: session.id });
-        if (!("error" in created)) addPendingDispatch(session.id, created.id);
-        console.log(`[auto-continue] dispatched: "${prompt.slice(0, 60)}" repo=${repoPath ?? "default"}`);
-      }
+      console.warn(`[auto-continue] ignoring DISPATCH in integration phase: ${inner.slice(0, 80)}`);
     }
 
+    // Tags are still stripped from stored content so the chat history is clean.
     const content = rawContent.replace(/\n?\[DISPATCH:[^\]]+\]/g, "").trimEnd();
     session.messages.push({ role: "assistant", content, timestamp: Date.now() });
     session.streaming = "";
@@ -152,13 +162,20 @@ function onTaskFinished(
   parentSessionId: string,
   outcome: "done" | "error" | "cancelled",
 ): void {
-  injectTaskOutcome(taskId, parentSessionId, outcome);
-  const wasLast = consumePendingDispatch(parentSessionId, taskId);
-  if (wasLast) {
-    // Defer one tick so the inject broadcast / DB write completes before the
-    // next CLI spawn starts reading session.messages.
-    setImmediate(() => { void autoContinueOrchestrator(parentSessionId); });
-  }
+  // Defer everything one tick. Reason: when a sub-task fails inline inside
+  // createTask (e.g. dirOk=false → finishTask runs synchronously), this
+  // handler would otherwise push the inject message into session.messages
+  // BEFORE the surrounding [DISPATCH:...] parsing loop has had a chance to
+  // push the parent assistant message. That produced a malformed history
+  // (inject precedes the assistant message that "dispatched" it), which the
+  // main agent then misinterpreted on auto-continue.
+  setImmediate(() => {
+    injectTaskOutcome(taskId, parentSessionId, outcome);
+    const wasLast = consumePendingDispatch(parentSessionId, taskId);
+    if (wasLast) {
+      setImmediate(() => { void autoContinueOrchestrator(parentSessionId); });
+    }
+  });
 }
 
 taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {

@@ -22,3 +22,9 @@ export function consumePendingDispatch(sessionId: string, taskId: string): boole
   }
   return false;
 }
+
+/** True if any sub-tasks dispatched from this session are still pending. */
+export function hasPendingDispatch(sessionId: string): boolean {
+  const set = pendingTasksBySession.get(sessionId);
+  return !!set && set.size > 0;
+}

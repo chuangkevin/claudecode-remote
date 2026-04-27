@@ -4,6 +4,7 @@ import { mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { config } from "./config.js";
+import { addPendingDispatch } from "./pending-dispatch.js";
 import {
   dbInsertTask, dbUpdateTask, dbLoadAllTasks, dbLoadTaskMessages,
   dbInsertTaskMessage, dbDeleteTask,
@@ -205,6 +206,13 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
   });
   console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
+
+  // Register in the pending-dispatch set BEFORE any path-validation fast-fail.
+  // Otherwise finishTask's onTaskFinished hook would call consumePendingDispatch
+  // before the task was ever added, and a later add (from the websocket.ts
+  // post-createTask call) would orphan the entry — preventing auto-continuation
+  // when the *other* sibling tasks finish.
+  if (task.parentSessionId) addPendingDispatch(task.parentSessionId, taskId);
 
   // Bail out cleanly if the path was bad — the task is now visible in the
   // UI with a clear failure reason instead of the cryptic ENOENT spawn error.
