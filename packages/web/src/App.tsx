@@ -343,13 +343,17 @@ function TasksPanel({ tasks, onCancel, onDelete }: {
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
+  // Sidebar layout: tab bar (flex-shrink-0) + this panel. Use flex-1 + min-h-0
+  // so this fills the remaining height AND allows the inner scroll container
+  // to shrink. h-full would refuse to shrink below content height, pushing
+  // the tab bar out the top of the viewport.
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3 pt-4 pb-2">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="px-3 pt-4 pb-2 flex-shrink-0">
         <p className="text-xs text-gray-600 px-1">任務由 AI 自動派工</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="flex-1 min-h-0 overflow-y-auto py-1">
         {tasks.length === 0 && (
           <div className="px-4 py-8 text-center text-gray-600 text-xs">尚無任務</div>
         )}
@@ -498,7 +502,7 @@ function Sidebar({
       {/* Tab content */}
       {tab === 'chat' ? (
         <>
-          <div className="px-3 pt-3 pb-2 flex items-center gap-2">
+          <div className="px-3 pt-3 pb-2 flex items-center gap-2 flex-shrink-0">
             <button onClick={onNew}
               className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium transition-colors">
               <span className="text-lg leading-none">+</span> 新對話
@@ -506,7 +510,7 @@ function Sidebar({
             <button onClick={onRefresh} title="重新整理" className="p-2 text-gray-500 hover:text-gray-300 rounded-lg hover:bg-gray-800">↻</button>
           </div>
 
-          <div className="flex-1 overflow-y-auto py-1">
+          <div className="flex-1 min-h-0 overflow-y-auto py-1">
             {sessions.length === 0 && (
               <div className="px-4 py-8 text-center text-gray-600 text-xs">尚無對話記錄</div>
             )}
