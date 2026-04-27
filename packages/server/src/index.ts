@@ -22,21 +22,20 @@ loadTasksFromDb();
 //
 // Format:
 //   line 1: [TASK_RESULT:<taskId>]               ← UI marker for compact card
-//   line 2: （子任務「<prompt>」（在 <repo>）已完成）  ← AI-readable frame
+//   line 2: （子任務「<prompt>」（在 <repo>）{結束狀態}）  ← AI-readable frame
 //   blank line
-//   rest:   <sub-agent's last assistant reply>   ← AI context for next turn
+//   rest:   <sub-agent output OR error message>  ← AI context for next turn
 //
-// On the next user turn, the main agent reads message.content from history
-// and sees the AI-readable frame + full reply. The opaque [TASK_RESULT:xxx]
-// header is sandwiched between standard chat lines, so even if Claude
-// notices it, the surrounding context is self-explanatory.
-taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
-  if (!ev.parentSessionId) return;
-  const session = getSession(ev.parentSessionId);
+// Both done and error/cancelled inject — otherwise the main agent has no
+// visibility into failures and can't react on the next user turn.
+function injectTaskOutcome(
+  taskId: string,
+  parentSessionId: string,
+  outcome: "done" | "error" | "cancelled",
+): void {
+  const session = getSession(parentSessionId);
   if (!session) return;
-  const task = getTask(ev.taskId);
-  const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
-  const summary = lastMsg?.content ?? "（無輸出）";
+  const task = getTask(taskId);
 
   const promptShort = task?.prompt
     ? (task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + "…" : task.prompt.trim())
@@ -44,14 +43,39 @@ taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) =>
   const repoLabel = task?.repoPath
     ? (task.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace")
     : "workspace";
-  const frame = `（子任務「${promptShort}」（在 ${repoLabel}）已完成，以下為其輸出）`;
-  const content = `[TASK_RESULT:${ev.taskId}]\n${frame}\n\n${summary}`;
 
+  let frame: string;
+  let body: string;
+  if (outcome === "done") {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）已完成，以下為其輸出）`;
+    const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
+    body = lastMsg?.content ?? "（無輸出）";
+  } else if (outcome === "cancelled") {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）已被取消）`;
+    body = "使用者或系統取消了這個子任務。請告訴使用者，或詢問是否需要重新派遣。";
+  } else {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）失敗，請依失敗原因處理：例如確認路徑是否正確、是否要重新派遣、或回報使用者）`;
+    const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
+    const raw = lastMsg?.content ?? "";
+    body = raw.startsWith("Error: ") ? `失敗原因：${raw.slice(7)}` : (raw || "（無錯誤訊息）");
+  }
+
+  const content = `[TASK_RESULT:${taskId}]\n${frame}\n\n${body}`;
   const msg = { role: "assistant" as const, content, timestamp: Date.now() };
   session.messages.push(msg);
   broadcast(session, { type: "inject", message: msg });
-  try { dbInsertMessage(ev.parentSessionId, "assistant", content); } catch { /* best-effort */ }
-  console.log(`[dispatch] injected result into session ${ev.parentSessionId.slice(0, 8)}`);
+  try { dbInsertMessage(parentSessionId, "assistant", content); } catch { /* best-effort */ }
+  console.log(`[dispatch] injected ${outcome} into session ${parentSessionId.slice(0, 8)}`);
+}
+
+taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "done");
+});
+taskEvents.on("task:error", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "error");
+});
+taskEvents.on("task:cancelled", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) injectTaskOutcome(ev.taskId, ev.parentSessionId, "cancelled");
 });
 
 // Pre-load all persisted sessions into the in-memory store so they are
