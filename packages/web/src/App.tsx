@@ -19,6 +19,7 @@ interface PendingImage {
   id?: string
   uploading: boolean
   error?: boolean
+  errorMessage?: string
 }
 
 interface DiskSession {
@@ -799,12 +800,19 @@ export default function App() {
         .then(({ aiBase64, thumbnail }) =>
           fetch('/api/upload-image', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ base64: aiBase64, mediaType: 'image/jpeg', thumbnail }) }).then(async r => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}`)
+            if (!r.ok) {
+              const body = await r.text().catch(() => '')
+              throw new Error(`HTTP ${r.status}${body ? `: ${body.slice(0, 200)}` : ''}`)
+            }
             const { id } = await r.json() as { id: string }
             setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, thumbnail, id, uploading: false } : p))
           })
         )
-        .catch(() => { setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, uploading: false, error: true } : p)) })
+        .catch((err: Error) => {
+          const msg = err?.message ?? String(err)
+          console.error('[upload-image]', file.name, msg, err)
+          setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, uploading: false, error: true, errorMessage: msg } : p))
+        })
     })
   }
 
@@ -980,7 +988,8 @@ export default function App() {
                     </div>
                   )}
                   {!p.uploading && p.error && (
-                    <div className="absolute inset-0 bg-red-900/70 rounded-lg flex items-center justify-center" title="上傳失敗">
+                    <div className="absolute inset-0 bg-red-900/70 rounded-lg flex items-center justify-center"
+                         title={p.errorMessage ? `上傳失敗：${p.errorMessage}` : '上傳失敗'}>
                       <span className="text-white text-lg font-bold">!</span>
                     </div>
                   )}
