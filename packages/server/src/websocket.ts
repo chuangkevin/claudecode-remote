@@ -273,6 +273,20 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
               } catch (dbErr) {
                 console.error("[ws] DB write error (error msg):", dbErr);
               }
+            })
+            // Final safety net: regardless of which branch ran (or threw),
+            // session.status must never be stuck at "running" once the
+            // promise chain settles. Without this, any uncaught throw inside
+            // .then() or .catch() above would leave the session permanently
+            // locked, producing the "Still processing previous message" bug.
+            .finally(() => {
+              if (activeSession.status === "running") {
+                console.warn(`[ws] session ${activeSession.id} status was still "running" after run settled — forcing idle`);
+                activeSession.status = "idle";
+                activeSession.streaming = "";
+                activeSession.lastRunFinishedAt = Date.now();
+                broadcast(activeSession, { type: "done" });
+              }
             });
           break;
         }

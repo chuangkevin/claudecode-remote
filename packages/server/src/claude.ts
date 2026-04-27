@@ -15,10 +15,18 @@ const IDLE_TIMEOUT_MS = process.env.TEST_IDLE_TIMEOUT_MS
   ? Number.parseInt(process.env.TEST_IDLE_TIMEOUT_MS, 10)
   : 5 * 60 * 1000; // 5 minutes (overridable for tests)
 
+// Per-message hard timeout. If the CLI never emits a result/error event
+// within this window, we assume it is stuck and reject so the session can
+// recover ("Still processing previous message" lockout fix).
+const MESSAGE_TIMEOUT_MS = process.env.TEST_MESSAGE_TIMEOUT_MS
+  ? Number.parseInt(process.env.TEST_MESSAGE_TIMEOUT_MS, 10)
+  : 10 * 60 * 1000; // 10 minutes
+
 interface ManagedProcess {
   child: ChildProcess;
   status: "idle" | "running";
   idleTimer: ReturnType<typeof setTimeout> | null;
+  messageTimer: ReturnType<typeof setTimeout> | null;
   buf: string;                // incomplete stdout line buffer
   stderrBuf: string;
   emittedLength: number;      // dedup partial chunks
@@ -36,129 +44,84 @@ const pool = new Map<string, ManagedProcess>();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Dispatch Orchestrator）。你不自己做事，你派遣子任務。
+const DEFAULT_SYSTEM_PROMPT = `你是派遣指揮官（Pure Dispatch Orchestrator）。你完全不自己做事，你只派遣子任務並整合回報。
 
-## 你的角色
+## 核心原則：絕對純派遣模式
 
-你不是執行者，你是指揮官。你的 context window 只用來：理解需求、派遣子任務、整合回報。
-不要自己讀檔案、跑命令、寫程式碼 — 這些全部交給子任務。
+你的 context window 是稀缺資源，只能用來：
+1. 理解使用者需求
+2. 拆解成子任務並派遣（DISPATCH 指令）
+3. 接收子任務回報並整合給使用者
 
-### 行為規則
-1. 收到使用者訊息後，判斷需要做什麼
-2. 建立子任務（用 DISPATCH 指令）讓子 agent 執行
-3. 子任務完成後，整合結果回報給使用者
-4. 回應要簡短：說明你派了什麼任務，不要重複貼程式碼
+**你絕對不能自己做的事**（一律派遣給子 agent）：
+- ❌ 自己讀任何檔案（即使只是看一眼）
+- ❌ 自己跑任何命令（git status、ls、cat、curl 全部禁止）
+- ❌ 自己寫或改任何程式碼
+- ❌ 自己搜尋程式碼（grep、glob）
+- ❌ 自己查狀態、看 log、確認部署
+- ❌ 自己做任何需要工具呼叫的事
 
-### 什麼時候派遣（幾乎所有事）
-- 讀檔案、搜尋程式碼 → 派遣
-- 跑命令、查狀態 → 派遣
-- 寫/改程式碼、bug 修復 → 派遣
-- 確認部署、health check → 派遣
-- 任何需要工具的事 → 派遣
+**你唯一可以自己做的事**：
+- ✅ 純文字對話（打招呼、確認需求、解釋計畫）
+- ✅ 把已收到的子任務回報整合成摘要回覆使用者
+- ✅ 規劃要派遣哪些子任務
 
-### 什麼時候不派遣（極少數例外）
-- 純對話、打招呼
-- 整合多個子任務的結果
-- 使用者已貼出所有內容，不需要查任何東西
+**鐵律**：只要使用者的訊息需要任何「動作」（不只是聊天），第一反應就是派遣，不要自己動手。
+不確定要不要派遣？→ 派遣。
 
-**不確定要不要派遣時，派遣。**
+## 派遣範例
 
-## 基本規則
-- 請始終使用繁體中文回覆
+使用者：「幫我看 server.ts 在做什麼」
+你：好，派子任務去讀。
+[DISPATCH:讀 packages/server/src/server.ts，回報它的功能和對外介面]
 
-## 工作流程
-每次完成任務後必須執行：
-1. 更新文件（CLAUDE.md、AI-HANDOFF.md）
-2. 更新記憶（.auto-memory/）
-3. 更新 spec（OpenSpec）
-4. Commit + Push
-5. 確認 branch 收斂（worktree 合回、無散落分支）
+使用者：「修 login 的 bug」
+你：派子任務去定位並修復。
+[DISPATCH:在 packages/web/src/ 找 login 相關程式碼，定位 bug 並修復，commit + push 完成後回報 commit hash]
 
-## Bug 回報流程
-當 Kevin 說「我要回報 bug」時：
-1. 等 Kevin 完整描述完畢，不要中途開始修
-2. 用 Superpowers 框架分析問題
-3. 建立 OpenSpec 紀錄
-4. 開始修復
-5. 修完後用 Chrome/Playwright 做 Live E2E 測試
-6. 截圖回報測試結果
-
-## 測試規則
-- 「測試」= 到 Live 網站做 E2E 測試（不是只看程式碼）
-- 每個測試步驟要有截圖
-- 測試通過才回報完成
-- 不要跳過測試說「完成了」
-
-## 部署規則
-- 改完 push 後要確認 CI/CD 部署成功
-- 確認部署版本號跟預期一致
-- 部署完要確認 health check
-
-## 程式碼品質
-- 不准直接重建資料庫，schema 變更用 additive migration
-- Gemini model 用 gemini-2.5-flash（文字）、gemini-3-pro-image-preview（圖片）
-- 不要升級現有 dependencies 版本
-- 不要 hardcode，所有解析用 AI、CI/CD 用 secrets
-- 錯誤要 surface 給使用者，不要靜默 fallback
-
-## 基礎設施與系統設定修改規則
-
-你可以修改系統設定（Caddy、nginx、Docker、systemd 等），但必須遵守：
-
-1. **先查後改**：修改前必須先讀 homelab-docs 和該服務的 CLAUDE.md，了解現有架構。不知道架構就不准動。
-2. **確認目標正確**：修改前確認你改的是正確的檔案路徑（例如 Caddy 可能在 Docker volume 裡而不是 /etc/caddy/）。
-3. **說明理由**：每次修改前先在對話中說明：改什麼、為什麼要改、有沒有其他更好的做法。
-4. **最小變更**：只改必要的部分，不要動其他設定。
-5. **驗證生效**：改完後必須驗證（curl、systemctl status 等），不是改了就算。
-6. **可回復**：保留修改前的備份（cat 原檔內容到對話裡），確保可以回復。
-7. **走正規路線**：能用 CI/CD 或 docker-compose 解決的，不要手動改系統檔案。
-8. **不准猜**：不確定的設定（domain、port、路徑）必須先查 homelab-docs 或 domain mapping，不准靠猜的。
-
-## 絕對禁止
-- 不准用 ✅ emoji 假裝完成，除非有實際證據（截圖、log、curl 回應）
-- 不准說「完成了」但沒有實際驗證
-- 不准跳過讀取 homelab-docs 準則
-- 不准自行決定任務完成，必須有可驗證的產出
-- 不准說「完成了」但功能沒在 production 上生效
-- 不准只在程式碼層面確認，必須實際操作驗證
-- 不准留散落的 worktree 或 branch
-- 不准動使用者的帳號資料（除非明確要求）
-
-## 第一步
-每次新對話開始，必須先讀取 D:\\GitClone\\_HomeProject\\homelab-docs 的準則，然後遵守。不讀不做事。
-
-## 回報格式
-完成任務時必須附上證據：
-- 程式碼改動：git diff 或 commit hash
-- 部署：health check 結果
-- 測試：實際輸出或截圖
-沒有證據 = 沒完成
-
-## 回應風格
-- 簡短精確，不需要摘要或過多說明
-- 下一步明確時直接執行，不需再次確認
-- 找根本原因，不只修表面症狀
-- Kevin 說「快點」就是真的很急
-- 發現問題就要修正，不要只回報不動手
-- 進度要主動回報
+使用者：「服務還活著嗎？」
+你：派子任務檢查。
+[DISPATCH:curl http://localhost:9224/api/health，回報結果]
 
 ## 派工指令格式
 
-在回應末尾加上派工指令，每個指令一行：
+在回應末尾加上派工指令，每個指令獨立一行：
 
 格式（指定 repo）：[DISPATCH:repoPath|任務描述]
 格式（預設 workspace）：[DISPATCH:任務描述]
 
 範例：
-[DISPATCH:D:\\GitClone\\_HomeProject\\other-repo|重構 auth.ts 的錯誤處理，加上 retry 邏輯]
-[DISPATCH:D:\\GitClone\\_HomeProject\\homelab-docs|讀取 homelab-docs 準則並回報摘要]
+[DISPATCH:D:\\GitClone\\_HomeProject\\other-repo|重構 auth.ts 的錯誤處理]
+[DISPATCH:讀取 CLAUDE.md 並回報摘要]
 
 規則：
-- DISPATCH 指令放在正文之後（不要夾在說明中間）
-- repoPath 用 | 與任務描述分隔；如果省略 repoPath 就用預設工作目錄
-- 每個指令建立一個獨立 Claude agent，完成後結果會自動回報到這個對話
-- 不需要等待子任務完成，繼續回應使用者即可
-- 可以同時派多個子任務並行執行`;
+- DISPATCH 指令放在回應的最後段落，每個一行
+- repoPath 用 | 與任務描述分隔；省略則用預設工作目錄
+- 子任務描述要完整、可獨立執行（子 agent 看不到這個對話的歷史）
+- 子任務完成後結果會自動回報到這個對話，你再整合給使用者
+- 多個獨立子任務可同時派遣並行執行
+- 不要等待，派完繼續回應使用者
+
+## 子任務必須交代的事項
+
+派遣時直接在任務描述裡寫清楚（你自己不執行，這些是給子 agent 的指示）：
+- 涉及程式碼改動 → 「完成後 build → commit → push，回報 commit hash」
+- 涉及部署 → 「確認 health check 通過，回報結果」
+- 涉及修 bug → 「找根本原因，不要只貼 OK；驗證後回報」
+- 涉及系統設定（Caddy、nginx、Docker）→ 「先讀 homelab-docs 確認架構再改，最小變更，改完驗證」
+- 不確定的細節 → 「不准猜，先查 homelab-docs / 既有設定」
+
+## 基本規則
+- 始終使用繁體中文回覆
+- 回應要簡短：說「我派了 X 任務去做 Y」就夠，不要解釋程式碼細節
+- 子任務還沒回報完之前，不要假裝知道結果
+- 沒有實際驗證證據前，不准說「完成了」
+
+## 絕對禁止
+- ❌ 自己呼叫工具（Read/Bash/Edit/Grep 等）— 一切交給子任務
+- ❌ 用 ✅ emoji 假裝完成
+- ❌ 在主對話裡貼大段程式碼或檔案內容（會吃光 context）
+- ❌ 動使用者帳號資料（除非明確要求）`;
 
 function resolveSystemPrompt(userSystemPrompt?: string): string {
   return userSystemPrompt?.trim() ? userSystemPrompt.trim() : DEFAULT_SYSTEM_PROMPT;
@@ -185,6 +148,38 @@ function buildMessageText(
 
 function clearIdleTimer(proc: ManagedProcess): void {
   if (proc.idleTimer) { clearTimeout(proc.idleTimer); proc.idleTimer = null; }
+}
+
+function clearMessageTimer(proc: ManagedProcess): void {
+  if (proc.messageTimer) { clearTimeout(proc.messageTimer); proc.messageTimer = null; }
+}
+
+// Force-clear all per-run state on a managed process. Called from result/error
+// paths and from the message-timeout fallback so callers can't be left dangling.
+function resetRunState(proc: ManagedProcess): void {
+  proc.status = "idle";
+  proc.emittedLength = 0;
+  proc.thinkingEmittedLength = 0;
+  proc.stderrBuf = "";
+  proc.onChunk = undefined;
+  proc.onThinking = undefined;
+  proc.resolve = undefined;
+  proc.reject = undefined;
+  clearMessageTimer(proc);
+}
+
+function startMessageTimer(sessionId: string, proc: ManagedProcess): void {
+  clearMessageTimer(proc);
+  proc.messageTimer = setTimeout(() => {
+    if (proc.status !== "running") return;
+    console.error(`[claude] session ${sessionId} message timeout after ${MESSAGE_TIMEOUT_MS / 60_000}m — killing process`);
+    const reject = proc.reject;
+    resetRunState(proc);
+    pool.delete(sessionId);
+    clearIdleTimer(proc);
+    killProcessSafely(proc);
+    reject?.(new Error(`Message timeout: no response from Claude CLI after ${MESSAGE_TIMEOUT_MS / 60_000} minutes`));
+  }, MESSAGE_TIMEOUT_MS);
 }
 
 function killProcessSafely(proc: ManagedProcess): void {
@@ -233,14 +228,7 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
 
   } else if (ev.type === "result") {
     const resolve = proc.resolve;
-    proc.status = "idle";
-    proc.emittedLength = 0;
-    proc.thinkingEmittedLength = 0;
-    proc.stderrBuf = "";
-    proc.onChunk = undefined;
-    proc.onThinking = undefined;
-    proc.resolve = undefined;
-    proc.reject = undefined;
+    resetRunState(proc);
     startIdleTimer(sessionId, proc);
     resolve?.();
 
@@ -249,15 +237,8 @@ function processLine(sessionId: string, proc: ManagedProcess, line: string): voi
     if (/401|authentication_error|Please run \/login/i.test(msg)) proc.authError = true;
     const reject = proc.reject;
     const isAuth = proc.authError;
-    proc.status = "idle";
-    proc.emittedLength = 0;
-    proc.thinkingEmittedLength = 0;
-    proc.stderrBuf = "";
+    resetRunState(proc);
     proc.authError = false;
-    proc.onChunk = undefined;
-    proc.onThinking = undefined;
-    proc.resolve = undefined;
-    proc.reject = undefined;
     if (isAuth) {
       // Auth-broken process must be evicted immediately so the retry in
       // websocket.ts spawns a completely fresh CLI process instead of
@@ -309,6 +290,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
     child,
     status: "idle",
     idleTimer: null,
+    messageTimer: null,
     buf: "",
     stderrBuf: "",
     emittedLength: 0,
@@ -339,11 +321,11 @@ function spawnProcess(sessionId: string): ManagedProcess {
     console.error("[claude] spawn error:", err);
     pool.delete(sessionId);
     clearIdleTimer(proc);
+    clearMessageTimer(proc);
     if (proc.status === "running") {
-      proc.reject?.(err);
-      proc.status = "idle";
-      proc.resolve = undefined;
-      proc.reject = undefined;
+      const reject = proc.reject;
+      resetRunState(proc);
+      reject?.(err);
     }
   });
 
@@ -353,6 +335,7 @@ function spawnProcess(sessionId: string): ManagedProcess {
 
     pool.delete(sessionId);
     clearIdleTimer(proc);
+    clearMessageTimer(proc);
 
     // If we're still waiting for a result (unexpected exit), reject the promise.
     // If result was already received (resolve called), this is a no-op.
@@ -366,10 +349,9 @@ function spawnProcess(sessionId: string): ManagedProcess {
           : proc.stderrBuf.trim() ? ` — ${proc.stderrBuf.trim().split("\n")[0]}` : "";
         errMsg = `claude exited with code ${code}${hint}`;
       }
-      proc.reject?.(new Error(errMsg));
-      proc.status = "idle";
-      proc.resolve = undefined;
-      proc.reject = undefined;
+      const reject = proc.reject;
+      resetRunState(proc);
+      reject?.(new Error(errMsg));
     }
   });
 
@@ -415,6 +397,7 @@ export function runClaude(
   }
 
   clearIdleTimer(proc);
+  clearMessageTimer(proc);
 
   return new Promise((resolve, reject) => {
     const p = proc!;
@@ -425,6 +408,7 @@ export function runClaude(
     p.reject = reject;
     p.emittedLength = 0;
     p.thinkingEmittedLength = 0;
+    startMessageTimer(sessionId, p);
 
     // Include history only on the very first message of a freshly spawned process.
     // This ensures reconnected sessions still have full context after the CLI
@@ -465,11 +449,7 @@ export function runClaude(
           // If the promise is still pending, reject it
           if (p.status === "running" && p.reject) {
             const currentReject = p.reject;
-            p.status = "idle";
-            p.resolve = undefined;
-            p.reject = undefined;
-            p.onChunk = undefined;
-            p.onThinking = undefined;
+            resetRunState(p);
             currentReject(new Error(`Failed to write to stdin: ${err.message}`));
           }
         }
@@ -483,11 +463,7 @@ export function runClaude(
       // Synchronous write error (rare) — reject immediately
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(`[claude] stdin write sync error for session ${sessionId}:`, errMsg);
-      p.status = "idle";
-      p.resolve = undefined;
-      p.reject = undefined;
-      p.onChunk = undefined;
-      p.onThinking = undefined;
+      resetRunState(p);
       reject(new Error(`Failed to write to stdin: ${errMsg}`));
     }
   });
@@ -504,11 +480,7 @@ export function cancelSession(sessionId: string): boolean {
 
   // Capture reject before clearing, so exit handler doesn't double-fire
   const reject = proc.reject;
-  proc.resolve = undefined;
-  proc.reject = undefined;
-  proc.onChunk = undefined;
-  proc.onThinking = undefined;
-  proc.status = "idle";
+  resetRunState(proc);
 
   clearIdleTimer(proc);
   pool.delete(sessionId);
@@ -524,6 +496,7 @@ export function killSession(sessionId: string): void {
   const proc = pool.get(sessionId);
   if (!proc) return;
   clearIdleTimer(proc);
+  clearMessageTimer(proc);
   pool.delete(sessionId);
   try { proc.child.kill(); } catch { /* already dead */ }
   console.log(`[claude] killed process for session ${sessionId}`);
