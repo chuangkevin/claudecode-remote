@@ -12,9 +12,11 @@ $ts          = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 # Port check + restart
 $listening = netstat -ano | Select-String ":9224\s.*LISTENING"
 if (-not $listening) {
+    $serverLog = Join-Path $projectRoot "server.log"
+    Add-Content -Path $serverLog -Value "`r`n=== $ts [watchdog] server was down — restarting ==="
     Start-Process -WindowStyle Hidden `
-        -FilePath "node" `
-        -ArgumentList "--env-file=.env", "packages/server/dist/index.js" `
+        -FilePath "cmd.exe" `
+        -ArgumentList "/c", "node --env-file=.env packages\server\dist\index.js >> server.log 2>&1" `
         -WorkingDirectory $projectRoot
     Add-Content -Path $logPath -Value "$ts [watchdog] server was down — restarted"
 }
