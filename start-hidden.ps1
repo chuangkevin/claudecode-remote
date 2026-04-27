@@ -19,11 +19,18 @@ Start-Process -WindowStyle Hidden `
     -ArgumentList "--env-file=.env", "packages/server/dist/index.js" `
     -WorkingDirectory $PSScriptRoot
 
-Start-Sleep -Seconds 2
+# Poll until port 9224 is listening (up to 15s — cold start needs SQLite init etc.)
+$started = $false
+for ($i = 1; $i -le 15; $i++) {
+    Start-Sleep -Seconds 1
+    if (netstat -ano | Select-String ":9224\s.*LISTENING") {
+        $started = $true
+        break
+    }
+}
 
-$check = netstat -ano | Select-String ":9224\s.*LISTENING"
-if ($check) {
-    Write-Host "✓ claudecode-remote started on port 9224" -ForegroundColor Green
+if ($started) {
+    Write-Host "✓ claudecode-remote started on port 9224 (after ${i}s)" -ForegroundColor Green
 } else {
-    Write-Host "✗ Failed to start — check node / .env" -ForegroundColor Red
+    Write-Host "✗ Failed to start within 15s — check node / .env / server.log" -ForegroundColor Red
 }
