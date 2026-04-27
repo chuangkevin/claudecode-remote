@@ -562,10 +562,10 @@ export default function App() {
   useEffect(() => { scrollToBottom() }, [messages, currentResponse])
 
   // Map each assistant message index → tasks dispatched from it.
-  // Heuristic: a task belongs to the assistant message whose timestamp range
-  // (start = msg.timestamp, end = next-message.timestamp) contains task.createdAt.
-  // Works for both live events and DB-loaded history because server emits
-  // task:created AFTER the assistant message's done event.
+  // Server timeline on done: createTask() runs FIRST, then the assistant
+  // message is pushed (with timestamp = now). So task.createdAt is always
+  // BEFORE the parent assistant message's timestamp. The correct range for
+  // an assistant message is therefore (prev message ts, this message ts].
   const tasksByMessageIndex = useMemo(() => {
     const map = new Map<number, TaskInfo[]>()
     if (!activeSessionId) return map
@@ -573,10 +573,10 @@ export default function App() {
     if (sessionTasks.length === 0) return map
     for (let i = 0; i < messages.length; i++) {
       if (messages[i].role !== 'assistant') continue
-      const start = messages[i].timestamp
-      const end = i + 1 < messages.length ? messages[i + 1].timestamp : Number.MAX_SAFE_INTEGER
+      const start = i > 0 ? messages[i - 1].timestamp : 0
+      const end = messages[i].timestamp
       const matched = sessionTasks
-        .filter(t => t.createdAt >= start && t.createdAt < end)
+        .filter(t => t.createdAt > start && t.createdAt <= end)
         .sort((a, b) => a.createdAt - b.createdAt)
       if (matched.length > 0) map.set(i, matched)
     }
