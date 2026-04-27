@@ -10,6 +10,8 @@ import { loadSession, getSession, broadcast } from "./store.js";
 import type { StoredMessage } from "./store.js";
 import { storeImage } from "./image-store.js";
 import { createTask, cancelTask, deleteTask, listTasks, getTask, loadTasksFromDb, taskEvents } from "./task-manager.js";
+import { runClaude, killSession } from "./claude.js";
+import { consumePendingDispatch, hasPendingDispatch } from "./pending-dispatch.js";
 
 // ── DB init + startup load ────────────────────────────────────────────────────
 
@@ -19,20 +21,171 @@ loadTasksFromDb();
 
 // When a sub-task finishes with a parentSessionId, inject the result into
 // the parent session as a new assistant message and broadcast to subscribers.
-taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
-  if (!ev.parentSessionId) return;
-  const session = getSession(ev.parentSessionId);
+//
+// Format:
+//   line 1: [TASK_RESULT:<taskId>]               ← UI marker for compact card
+//   line 2: （子任務「<prompt>」（在 <repo>）{結束狀態}）  ← AI-readable frame
+//   blank line
+//   rest:   <sub-agent output OR error message>  ← AI context for next turn
+//
+// Both done and error/cancelled inject — otherwise the main agent has no
+// visibility into failures and can't react on the next user turn.
+function injectTaskOutcome(
+  taskId: string,
+  parentSessionId: string,
+  outcome: "done" | "error" | "cancelled",
+): void {
+  const session = getSession(parentSessionId);
   if (!session) return;
-  const task = getTask(ev.taskId);
-  const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
-  const summary = lastMsg?.content?.slice(0, 400) ?? "（無輸出）";
-  const prompt  = task?.prompt.slice(0, 80) ?? "";
-  const content = `📋 **子任務完成**：${prompt}\n\n${summary}`;
+  const task = getTask(taskId);
+
+  const promptShort = task?.prompt
+    ? (task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + "…" : task.prompt.trim())
+    : "";
+  const repoLabel = task?.repoPath
+    ? (task.repoPath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace")
+    : "workspace";
+
+  let frame: string;
+  let body: string;
+  if (outcome === "done") {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）已完成，以下為其輸出）`;
+    const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
+    body = lastMsg?.content ?? "（無輸出）";
+  } else if (outcome === "cancelled") {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）已被取消）`;
+    body = "使用者或系統取消了這個子任務。請告訴使用者，或詢問是否需要重新派遣。";
+  } else {
+    frame = `（子任務「${promptShort}」（在 ${repoLabel}）失敗，請依失敗原因處理：例如確認路徑是否正確、是否要重新派遣、或回報使用者）`;
+    const lastMsg = task?.messages.slice().reverse().find((m: { role: string }) => m.role === "assistant");
+    const raw = lastMsg?.content ?? "";
+    body = raw.startsWith("Error: ") ? `失敗原因：${raw.slice(7)}` : (raw || "（無錯誤訊息）");
+  }
+
+  const content = `[TASK_RESULT:${taskId}]\n${frame}\n\n${body}`;
   const msg = { role: "assistant" as const, content, timestamp: Date.now() };
   session.messages.push(msg);
   broadcast(session, { type: "inject", message: msg });
-  try { dbInsertMessage(ev.parentSessionId, "assistant", content); } catch { /* best-effort */ }
-  console.log(`[dispatch] injected result into session ${ev.parentSessionId.slice(0, 8)}`);
+  try { dbInsertMessage(parentSessionId, "assistant", content); } catch { /* best-effort */ }
+  console.log(`[dispatch] injected ${outcome} into session ${parentSessionId.slice(0, 8)}`);
+}
+
+// ── Orchestrator auto-continuation ────────────────────────────────────────────
+//
+// addPendingDispatch is called by websocket.ts when [DISPATCH:...] tags are
+// parsed (and below, when auto-continue itself dispatches). consumePendingDispatch
+// is called when each sub-task finishes. When the pending set drains to
+// empty AND the session is idle, autoContinueOrchestrator fires one more
+// run of the main agent with a synthetic prompt to integrate the results.
+
+const AUTO_CONTINUE_PROMPT =
+  "上方對話中，每一則開頭為「（子任務「...」」的 Assistant 訊息，都是先前派遣的子任務回傳的結果（成功或失敗）。" +
+  "請根據這些結果整合並回應使用者最原本的問題：成功的子任務輸出整合成完整回答；失敗的子任務告訴使用者哪裡失敗、為什麼，以及建議下一步。" +
+  "請勿產生新的 [DISPATCH:...] 標籤，直接整合回答即可。";
+
+async function autoContinueOrchestrator(sessionId: string): Promise<void> {
+  const session = getSession(sessionId);
+  if (!session) return;
+  // Re-check: more sibling tasks may have been dispatched (or even queued
+  // up another fast-fail) between the consumePendingDispatch that scheduled
+  // this run and setImmediate firing it.
+  if (hasPendingDispatch(sessionId)) return;
+  // Atomic claim: another task finishing concurrently must not also fire a run.
+  if (session.status !== "idle") return;
+  session.status = "running";
+  session.streaming = "";
+
+  let systemPrompt = "";
+  try { ({ systemPrompt } = await getSettings()); } catch { /* default */ }
+
+  // The persistent Claude CLI process for this session has its own internal
+  // conversation memory. The inject messages we pushed into session.messages
+  // were never sent to it (runClaude only re-feeds full history on first
+  // message of a freshly spawned process). Kill the CLI so the next runClaude
+  // call respawns and replays the full session.messages — including the
+  // [TASK_RESULT:...] injects that contain the sub-agent outputs.
+  killSession(session.id);
+
+  try {
+    await runClaude(
+      session.id, AUTO_CONTINUE_PROMPT, session.messages,
+      (text) => { session.streaming += text; broadcast(session, { type: "chunk", text }); },
+      systemPrompt,
+      undefined,
+      (text) => { broadcast(session, { type: "thinking", text }); },
+    );
+
+    session.lastRunFinishedAt = Date.now();
+    session.status = "idle";
+    const rawContent = session.streaming;
+
+    // Auto-continue is the INTEGRATION phase — it must not start a new round
+    // of orchestration. The synthetic prompt explicitly tells the AI not to
+    // produce more [DISPATCH:...] tags, but the system prompt's "派遣 99%"
+    // tendency sometimes wins anyway (often as placeholder `[DISPATCH:...]`
+    // with literal `...` content). We log and ignore any DISPATCH tags here
+    // to prevent the orchestrator from looping back into itself.
+    const DISPATCH_RE = /\[DISPATCH:([^\]]+)\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = DISPATCH_RE.exec(rawContent)) !== null) {
+      const inner = m[1];
+      console.warn(`[auto-continue] ignoring DISPATCH in integration phase: ${inner.slice(0, 80)}`);
+    }
+
+    // Tags are still stripped from stored content so the chat history is clean.
+    const content = rawContent.replace(/\n?\[DISPATCH:[^\]]+\]/g, "").trimEnd();
+    session.messages.push({ role: "assistant", content, timestamp: Date.now() });
+    session.streaming = "";
+    broadcast(session, { type: "done" });
+    try {
+      dbInsertMessage(session.id, "assistant", content);
+      dbUpsertSession(session.id, { updatedAt: session.lastRunFinishedAt });
+    } catch (e) { console.error("[auto-continue] DB write error:", e); }
+  } catch (err) {
+    session.lastRunFinishedAt = Date.now();
+    session.streaming = "";
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg === "Cancelled") {
+      session.status = "idle";
+      broadcast(session, { type: "cancelled" });
+      return;
+    }
+    session.messages.push({ role: "assistant", content: `Error: ${errMsg}`, timestamp: Date.now() });
+    session.status = "error";
+    broadcast(session, { type: "error", message: errMsg });
+    try { dbInsertMessage(session.id, "assistant", `Error: ${errMsg}`); } catch { /* ignore */ }
+  }
+}
+
+function onTaskFinished(
+  taskId: string,
+  parentSessionId: string,
+  outcome: "done" | "error" | "cancelled",
+): void {
+  // Defer everything one tick. Reason: when a sub-task fails inline inside
+  // createTask (e.g. dirOk=false → finishTask runs synchronously), this
+  // handler would otherwise push the inject message into session.messages
+  // BEFORE the surrounding [DISPATCH:...] parsing loop has had a chance to
+  // push the parent assistant message. That produced a malformed history
+  // (inject precedes the assistant message that "dispatched" it), which the
+  // main agent then misinterpreted on auto-continue.
+  setImmediate(() => {
+    injectTaskOutcome(taskId, parentSessionId, outcome);
+    const wasLast = consumePendingDispatch(parentSessionId, taskId);
+    if (wasLast) {
+      setImmediate(() => { void autoContinueOrchestrator(parentSessionId); });
+    }
+  });
+}
+
+taskEvents.on("task:done", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "done");
+});
+taskEvents.on("task:error", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "error");
+});
+taskEvents.on("task:cancelled", (ev: { taskId: string; parentSessionId?: string }) => {
+  if (ev.parentSessionId) onTaskFinished(ev.taskId, ev.parentSessionId, "cancelled");
 });
 
 // Pre-load all persisted sessions into the in-memory store so they are

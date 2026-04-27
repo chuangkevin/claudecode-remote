@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { config } from "./config.js";
+import { addPendingDispatch } from "./pending-dispatch.js";
 import {
   dbInsertTask, dbUpdateTask, dbLoadAllTasks, dbLoadTaskMessages,
   dbInsertTaskMessage, dbDeleteTask,
@@ -58,6 +59,36 @@ function isGitRepo(path: string): boolean {
     execSync(`git -C "${path}" rev-parse --git-dir`, { stdio: "pipe", timeout: 5_000 });
     return true;
   } catch { return false; }
+}
+
+const SKIP_DIR_NAMES = new Set(["node_modules", ".git", ".worktrees", "dist", "build", ".next", ".cache", ".vscode", ".idea"]);
+
+/**
+ * Search for directories named `target` under `root`, breadth-first up to maxDepth levels.
+ * Skips noisy directories (node_modules, .git, etc.) so a typical workspace scan
+ * stays under ~50ms.
+ */
+function findDirsByBasename(root: string, target: string, maxDepth = 4): string[] {
+  const matches: string[] = [];
+  const queue: { dir: string; depth: number }[] = [{ dir: root, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift()!;
+    if (depth >= maxDepth) continue;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (SKIP_DIR_NAMES.has(e.name)) continue;
+      const full = join(dir, e.name);
+      if (e.name === target) matches.push(full);
+      queue.push({ dir: full, depth: depth + 1 });
+    }
+  }
+  return matches;
 }
 
 function tryCreateWorktree(repoPath: string, wtPath: string, branch: string): boolean {
@@ -139,8 +170,31 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     return { error: `已達最大並行上限 (${MAX_CONCURRENT})` };
   }
 
-  const repoPath = params.repoPath?.trim() || config.workspaceRoot;
-  const isRepo = isGitRepo(repoPath);
+  let repoPath = params.repoPath?.trim() || config.workspaceRoot;
+  let resolutionNote: string | null = null;
+
+  // If the path doesn't exist as-is, try to resolve it: take the basename
+  // (e.g. "sheet-to-car") and look for a directory by that name anywhere
+  // under WORKSPACE_ROOT. The main agent often guesses paths like
+  // "${WORKSPACE_ROOT}/<name>" without knowing the repo is actually nested
+  // (e.g. inside _car-maintain). Auto-correcting saves a failed dispatch
+  // and a follow-up retry.
+  let dirOk = existsSync(repoPath) && statSync(repoPath).isDirectory();
+  if (!dirOk) {
+    const target = basename(repoPath);
+    if (target && target !== repoPath) {  // skip if input was just a bare basename — search would loop on itself
+      const matches = findDirsByBasename(config.workspaceRoot, target);
+      if (matches.length === 1) {
+        resolutionNote = `路徑解析：${repoPath} → ${matches[0]}`;
+        repoPath = matches[0];
+        dirOk = true;
+        console.log(`[task] ${resolutionNote}`);
+      } else if (matches.length > 1) {
+        resolutionNote = `路徑「${target}」在 workspace 下有多個候選，請指定完整路徑：${matches.join(" / ")}`;
+      }
+    }
+  }
+  const isRepo = dirOk && isGitRepo(repoPath);
   const taskId = randomUUID();
   const slug = sanitizeBranch(params.prompt.slice(0, 20));
   const branchName = isRepo ? `task/${slug}-${taskId.slice(0, 6)}` : null;
@@ -184,9 +238,39 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
 
   try {
     dbInsertTask({ id: taskId, repoPath, worktreeName: actualWorktreeName,
-                   branchName: actualBranch, prompt: params.prompt, status: "running", createdAt: now });
+                   branchName: actualBranch, prompt: params.prompt, status: "running",
+                   parentSessionId: params.parentSessionId, createdAt: now });
     dbInsertTaskMessage(taskId, "user", params.prompt);
   } catch (e) { console.error("[task] DB insert error:", e); }
+
+  const repoLabelEarly = basename(repoPath);
+  taskEvents.emit("task:created", {
+    type: "task:created",
+    taskId, repoPath, repoLabel: repoLabelEarly,
+    worktreeName: actualWorktreeName,
+    branchName: actualBranch,
+    prompt: params.prompt,
+    createdAt: now,
+    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+  });
+  console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
+
+  // Register in the pending-dispatch set BEFORE any path-validation fast-fail.
+  // Otherwise finishTask's onTaskFinished hook would call consumePendingDispatch
+  // before the task was ever added, and a later add (from the websocket.ts
+  // post-createTask call) would orphan the entry — preventing auto-continuation
+  // when the *other* sibling tasks finish.
+  if (task.parentSessionId) addPendingDispatch(task.parentSessionId, taskId);
+
+  // Bail out cleanly if the path was bad — the task is now visible in the
+  // UI with a clear failure reason instead of the cryptic ENOENT spawn error.
+  if (!dirOk) {
+    const reason = resolutionNote
+      ? resolutionNote  // tells AI exactly which candidates exist, so retry is straightforward
+      : `目錄不存在或不是資料夾：${repoPath}（在 workspace ${config.workspaceRoot} 下也找不到同名目錄）`;
+    finishTask(task, "error", reason);
+    return toInfo(task);
+  }
 
   // Spawn Claude CLI
   const env = { ...process.env };
@@ -239,16 +323,6 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     "utf8",
   );
 
-  const repoLabel = basename(repoPath);
-  taskEvents.emit("task:created", {
-    type: "task:created",
-    taskId, repoPath, repoLabel,
-    worktreeName: actualWorktreeName,
-    branchName: actualBranch,
-    prompt: params.prompt,
-    createdAt: now,
-  });
-  console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
   return toInfo(task);
 }
 
@@ -312,6 +386,7 @@ export function loadTasksFromDb(): void {
       proc: null,
       buf: "",
       emittedLength: 0,
+      ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
     };
     activeTasks.set(row.id, task);
   }

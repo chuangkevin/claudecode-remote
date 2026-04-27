@@ -131,6 +131,92 @@ interface TaskInfo {
 - `claude.ts` 偵測到 `AUTH_401` 時立即從 pool 移除該 process，不讓下次 retry 重用
 - `doRun()` retry 會取得乾淨的新 process，避免無限重試同一個壞 process
 
+### Phase 3 P2：Orchestrator 自動接續 + 路徑自動修正（✅ 完成 2026-04-27）
+
+#### 自動接續整合（auto-continuation）
+
+主 agent 派遣子任務後若不再被觸發，會卡住（user 必須手動發訊息）。改為當所有派遣的子任務都結束（成功 / 失敗 / 取消）且 session idle 時，server 自動以合成 prompt 觸發主 agent 整合。
+
+- 新增 `pending-dispatch.ts`：per-session 追蹤已派遣未完成的 task IDs
+- `addPendingDispatch` 移到 `createTask` 內部（避免內聯 fast-fail 造成 orphaned 條目）
+- `consumePendingDispatch` 排空時 `setImmediate(autoContinueOrchestrator)`
+- `autoContinueOrchestrator`：
+  - 二次檢查 pending 真的為空（race guard）
+  - 檢查 session.status === 'idle' 才執行（user 正在打字就 skip）
+  - **`killSession()` 強制重 spawn CLI，讓新 process 第一次訊息重送完整 history**（含所有 inject）
+  - 跑完後仍解析 stripped DISPATCH 但**不再觸發 createTask**（整合階段不允許 chained dispatch，避免 loop）
+
+#### 子任務結果格式（取代 Phase 3 P1 的 inject）
+
+```
+[TASK_RESULT:<taskId>]
+（子任務「<prompt>」（在 <repo>）已完成，以下為其輸出）  ← AI-readable frame
+
+<sub-agent's last assistant reply>                    ← 完整輸出（不截斷）
+```
+
+- 第一行 marker 給 UI（壓縮成卡片），不送給 AI（`stripUiMarkers` 在 `claude.ts` 過濾）
+- 第二行 frame 用人話說明這是什麼，AI 自然能解讀
+- body 不再切 400 字，AI 拿到完整資訊
+- `error` / `cancelled` 也 inject（之前只有 done），主 agent 看得到失敗
+
+#### DISPATCH 標籤保留在儲存內容（silent regression 修復）
+
+- 之前 `websocket.ts` 把 `[DISPATCH:...]` 從 stored content 剝除 → AI 後續對話只看到「我派遣了兩個任務」這種純文字 → 模仿 → 不再輸出標籤 → 任務 panel 永遠空
+- 改為保留 raw 在 DB / session.messages
+- `App.tsx` 加 `stripDispatchTagsForDisplay`，render 前才 strip（雙處：stored messages 和 currentResponse）
+- 順便修了 markdown 表格被 DISPATCH 標籤夾在中間破壞解析的問題
+
+#### 路徑自動解析（basename 匹配）
+
+主 agent 常猜錯 repo 路徑（`${WORKSPACE_ROOT}/<name>` 但實際巢狀在 `_car-maintain/<name>`）。`task-manager.ts` `findDirsByBasename`：
+
+- BFS under WORKSPACE_ROOT，max depth 4，跳過 `node_modules / .git / .worktrees / dist / build / .next / .cache / .vscode / .idea`
+- 路徑不存在時 → 取 basename 搜尋
+- 1 個 match：silently 用解析後路徑，log `路徑解析：xxx → yyy`
+- 多個：失敗訊息列出候選，AI 下一輪可重派
+- 0 個：「在 workspace 下也找不到同名目錄」
+
+#### 失敗訊息可見化
+
+- Path-fail 在 `createTask` 早期偵測（`existsSync + statSync`），避免 spawn 才噴 `cmd.exe ENOENT` 誤導
+- 失敗任務仍 emit `task:created` + 立刻 `finishTask("error", ...)` → UI 看得到壞掉的 task 卡片
+- `App.tsx` `InlineTaskCard` / `TaskResultCard` 在 status === 'error' 時顯示一行紅字錯誤原因
+
+#### Persisted parent_session_id
+
+- `tasks` table 新增 `parent_session_id` 欄位 + idempotent ALTER migration
+- `dbInsertTask` / `loadTasksFromDb` 雙向支援
+- 修復 server 重啟後 in-memory parentSessionId 遺失 → inline cards filter 失效的 bug
+
+#### Inline task cards in chat
+
+- 派遣訊息下方直接渲染卡片：repo label、prompt 摘要、status badge、錯誤訊息
+- 用 timestamp range 算 `tasksByMessageIndex` (msg[i-1].ts, msg[i].ts]
+- Cards 為純資訊 div（不是按鈕），不再強制切換 sidebar tab
+
+#### Server stdout/stderr 持久化
+
+- `start-hidden.ps1` / `watchdog.ps1` 改用 `cmd /c node ... >> server.log 2>&1`
+- 每次啟動寫時間戳 header 分隔（race-safe retry）
+- 從此 crash / spawn error / 401 等都會記到 `server.log`
+
+#### Sidebar 排版穩定
+
+- TasksPanel / 對話 tab 內容改用 `flex-1 min-h-0`（取代 `h-full`）
+- 修復 task list 過長時把 tab bar 擠出視窗的 layout bug
+
+#### 其他
+
+- `check-auth.ps1` 優先讀 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN`（不再誤報「6.9h 過期」）
+- `start-hidden.ps1` port-listening polling 取代固定 sleep 2s 單次檢查
+- `watchdog.ps1` 路徑改用 `$PSScriptRoot`（不再寫死 Kevin's path）
+- 預設 system prompt 中性化（移除 Kevin 個人 workflow），路徑用 `{{WORKSPACE_ROOT}}` placeholder
+- Settings panel 加「清空（用預設）」「載入預設值」「檢視預設值」按鈕
+- 對話輸入框 resize-y + per-browser localStorage 記憶高度
+- Inline 圖片上傳失敗訊息顯示具體錯誤（hover title）
+- `tasks` table 新增 `parent_session_id` migration
+
 ### 設計決策（與原計劃不同之處）
 
 | 原計劃 | 實際實作 | 原因 |
