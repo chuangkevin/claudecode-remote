@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { config } from "./config.js";
@@ -140,7 +140,12 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
   }
 
   const repoPath = params.repoPath?.trim() || config.workspaceRoot;
-  const isRepo = isGitRepo(repoPath);
+  // Validate the path early. If bad, we still record the task (so it shows
+  // up in the UI with a clear failure reason) but skip the spawn step —
+  // child_process.spawn would otherwise throw a misleading
+  // "spawn cmd.exe ENOENT" when its cwd doesn't exist.
+  const dirOk = existsSync(repoPath) && statSync(repoPath).isDirectory();
+  const isRepo = dirOk && isGitRepo(repoPath);
   const taskId = randomUUID();
   const slug = sanitizeBranch(params.prompt.slice(0, 20));
   const branchName = isRepo ? `task/${slug}-${taskId.slice(0, 6)}` : null;
@@ -188,6 +193,25 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
                    parentSessionId: params.parentSessionId, createdAt: now });
     dbInsertTaskMessage(taskId, "user", params.prompt);
   } catch (e) { console.error("[task] DB insert error:", e); }
+
+  const repoLabelEarly = basename(repoPath);
+  taskEvents.emit("task:created", {
+    type: "task:created",
+    taskId, repoPath, repoLabel: repoLabelEarly,
+    worktreeName: actualWorktreeName,
+    branchName: actualBranch,
+    prompt: params.prompt,
+    createdAt: now,
+    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
+  });
+  console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
+
+  // Bail out cleanly if the path was bad — the task is now visible in the
+  // UI with a clear failure reason instead of the cryptic ENOENT spawn error.
+  if (!dirOk) {
+    finishTask(task, "error", `目錄不存在或不是資料夾：${repoPath}`);
+    return toInfo(task);
+  }
 
   // Spawn Claude CLI
   const env = { ...process.env };
@@ -240,17 +264,6 @@ export function createTask(params: { repoPath?: string; prompt: string; parentSe
     "utf8",
   );
 
-  const repoLabel = basename(repoPath);
-  taskEvents.emit("task:created", {
-    type: "task:created",
-    taskId, repoPath, repoLabel,
-    worktreeName: actualWorktreeName,
-    branchName: actualBranch,
-    prompt: params.prompt,
-    createdAt: now,
-    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
-  });
-  console.log(`[task] ${taskId.slice(0, 8)} created in ${worktreePath}`);
   return toInfo(task);
 }
 

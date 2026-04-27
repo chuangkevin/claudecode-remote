@@ -293,6 +293,13 @@ function TaskResultCard({ task, body, onOpen }: { task: TaskInfo | undefined; bo
 
 // ── Inline dispatched-task card (shown under assistant message that triggered it) ─
 
+function extractTaskError(task: TaskInfo): string | null {
+  if (task.status !== 'error') return null
+  const last = task.messages.slice().reverse().find(m => m.role === 'assistant')
+  if (!last) return null
+  return last.content.startsWith('Error: ') ? last.content.slice(7) : last.content
+}
+
 function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }) {
   const repoLabel = task.repoLabel ?? repoBasename(task.repoPath)
   const promptPreview = task.prompt.length > 100 ? task.prompt.slice(0, 100).trim() + '…' : task.prompt
@@ -302,11 +309,12 @@ function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }
     error: '失敗',
     cancelled: '已取消',
   }
+  const errorMsg = extractTaskError(task)
   return (
     <button
       onClick={onOpen}
       className="w-full text-left bg-gray-900/60 border border-gray-700 hover:border-gray-500 rounded-lg px-3 py-2 transition-colors flex items-start gap-2 group"
-      title="點擊跳到「任務」分頁查看完整輸出"
+      title={errorMsg ? `失敗原因：${errorMsg}` : '點擊跳到「任務」分頁查看完整輸出'}
     >
       <span className="mt-0.5"><TaskStatusBadge status={task.status} /></span>
       <div className="flex-1 min-w-0">
@@ -314,9 +322,12 @@ function InlineTaskCard({ task, onOpen }: { task: TaskInfo; onOpen: () => void }
           <span className="text-gray-300">→ 派遣到</span>
           <code className="text-blue-300 font-mono">{repoLabel}</code>
           <span className="text-gray-500">·</span>
-          <span className="text-gray-500">{statusLabel[task.status]}</span>
+          <span className={task.status === 'error' ? 'text-red-400' : 'text-gray-500'}>{statusLabel[task.status]}</span>
         </div>
         <div className="text-xs text-gray-400 mt-1 break-all whitespace-pre-wrap line-clamp-2">{promptPreview}</div>
+        {errorMsg && (
+          <div className="text-xs text-red-400 mt-1 break-all line-clamp-2">⚠ {errorMsg}</div>
+        )}
       </div>
       <span className="text-gray-600 text-xs opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">查看 →</span>
     </button>
