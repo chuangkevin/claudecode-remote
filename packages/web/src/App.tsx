@@ -925,9 +925,7 @@ export default function App() {
     setSidebarOpen(false)
   }
 
-  const onImagePick = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? [])
-    e.target.value = ''
+  const handleImageFiles = (files: File[]) => {
     if (files.length === 0) return
     const placeholders = files.map(f => ({ localId: crypto.randomUUID(), file: f, preview: URL.createObjectURL(f) }))
     setPendingImages(prev => [...prev, ...placeholders.map(p => ({ localId: p.localId, preview: p.preview, thumbnail: '', uploading: true }))])
@@ -950,6 +948,28 @@ export default function App() {
           setPendingImages(prev => prev.map(p => p.localId === localId ? { ...p, uploading: false, error: true, errorMessage: msg } : p))
         })
     })
+  }
+
+  const onImagePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    e.target.value = ''
+    handleImageFiles(files)
+  }
+
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const accepted = new Set(ACCEPTED.split(','))
+    const files: File[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind !== 'file' || !accepted.has(item.type)) continue
+      const f = item.getAsFile()
+      if (f) files.push(f)
+    }
+    if (files.length === 0) return
+    e.preventDefault()
+    handleImageFiles(files)
   }
 
   const removeImage = (idx: number) => {
@@ -1198,7 +1218,7 @@ export default function App() {
             </button>
             <input ref={fileInputRef} type="file" accept={ACCEPTED} multiple className="hidden" onChange={onImagePick} />
 
-            <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown}
+            <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} onPaste={onPaste}
               placeholder={isProcessing ? '輸入訊息… (Enter 排隊，Shift+Enter 換行)' : '輸入訊息… (Enter 傳送，Shift+Enter 換行)'}
               className="flex-1 resize-y min-h-[60px] max-h-[60vh] rounded-xl border border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-500 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50"
               style={inputHeight ? { height: `${inputHeight}px` } : undefined}
