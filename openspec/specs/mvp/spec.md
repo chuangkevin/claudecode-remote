@@ -34,6 +34,7 @@
 - [x] 上傳中顯示 spinner；成功顯示綠勾；失敗顯示紅色 `!`（不自動消失）
 - [x] bodyLimit 25MB，防止手機大圖被截斷
 - [x] 圖片縮圖持久化到 `StoredMessage.images`，resume 時帶回
+- [x] 輸入框支援剪貼簿貼上（`onPaste`）— 截圖/複製的圖檔（jpeg/png/gif/webp）走相同上傳管線
 
 ### Session 管理
 - [x] 側邊欄只列 claudecode-remote 建立的 session（不混入其他工具的 JSONL）
