@@ -158,30 +158,14 @@ export async function setupWebSocketHandler(server: FastifyInstance) {
             session.streaming = "";
           }
 
-          // Preempt: if a run is in progress, cancel it so the user's new
-          // message takes priority. Without this, autoContinueOrchestrator
-          // (which sets status="running" while integrating sub-task results
-          // for ~30-60s) blocks the next message with "Still processing
-          // previous message" — a frustrating dead-end where the user is
-          // forced to wait through orchestration they no longer care about.
-          // The cancel rejects the in-flight runClaude promise with
-          // "Cancelled", which the existing .catch handlers (in this file's
-          // doRun chain AND in index.ts's autoContinueOrchestrator) already
-          // route to status=idle + broadcast cancelled. We then proceed
-          // with the new message normally.
+          // Reject only when main session is actually running (e.g. autoContinueOrchestrator
+          // is integrating sub-task results). Frontend already enqueues on isProcessing,
+          // so this branch is a defensive guard for races; sub-agents running in worktrees
+          // do NOT keep main session "running" (main went idle right after dispatch + broadcast
+          // done), so user messages during sub-agent execution still flow through.
           if (session.status === "running") {
-            console.log(`[ws] preempting running session ${session.id} for new user message`);
-            cancelSession(session.id);
-            // Brief wait for cancel cleanup so the .catch handler can flip
-            // status to idle before we set it to running for the new run.
-            // Without this wait, a microtask race could leave the session
-            // permanently stuck (.catch fires AFTER our new status=running,
-            // overwriting it back to idle).
-            await new Promise(resolve => setTimeout(resolve, 50));
-            if (session.status === "running") {
-              session.status = "idle";
-              session.streaming = "";
-            }
+            send(connection, { type: "error", message: "Still processing previous message" });
+            return;
           }
 
           if (!unsubscribe) subscribeTo(session);
