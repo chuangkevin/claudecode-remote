@@ -147,6 +147,14 @@ interface TaskInfo {
   - **`killSession()` 強制重 spawn CLI，讓新 process 第一次訊息重送完整 history**（含所有 inject）
   - 跑完後仍解析 stripped DISPATCH 但**不再觸發 createTask**（整合階段不允許 chained dispatch，避免 loop）
 
+#### 排隊 vs preempt 設計決策
+
+派遣與整合是兩個不同階段，使用者新訊息的處理方式也不同：
+
+- **派遣階段（main 派完 sub-agent）**：main session 立刻 idle 並 broadcast `done`（`websocket.ts:275`），前端 `isProcessing=false`。期間 sub-agent 在 task-manager 獨立跑，**不**讓 main 維持 running。使用者新訊息 → 直接送，不 enqueue。
+- **整合階段（autoContinueOrchestrator 已 fire）**：main 真正 running，前端 `isProcessing=true`，使用者新訊息 → 前端 enqueue 等 `done`／`cancelled`／`error` 事件後 dequeue。
+- **不 cancel 整合**：曾經試過在 server 端 `cancelSession` 搶斷整合（commit a079b5d），但這會把 sub-agent 累積的成果丟掉。改回原本「running 才回 `Still processing` error」的防護；前端隊列已負責正常情境，server 只是 race guard。
+
 #### 子任務結果格式（取代 Phase 3 P1 的 inject）
 
 ```
